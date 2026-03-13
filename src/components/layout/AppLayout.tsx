@@ -7,8 +7,10 @@ import {
   Upload,
   MessageSquare,
   TrendingUp,
+  LogOut,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useAuth } from '@/hooks/useAuth'
 
 const NAV = [
   { to: '/dashboard',     icon: LayoutDashboard, label: 'Dashboard' },
@@ -20,6 +22,8 @@ const NAV = [
 ]
 
 export default function AppLayout() {
+  const { signOut, user } = useAuth()
+
   return (
     <div className="flex h-screen overflow-hidden">
       {/* Sidebar */}
@@ -47,8 +51,15 @@ export default function AppLayout() {
         </nav>
 
         {/* Footer */}
-        <div className="px-4 py-3 border-t border-gray-800 text-xs text-gray-600">
-          Ottawa · CAD · 2025
+        <div className="px-3 py-3 border-t border-gray-800 space-y-1">
+          <div className="text-xs text-gray-600 px-1 truncate">{user?.email}</div>
+          <button
+            onClick={signOut}
+            className="nav-link w-full text-gray-500 hover:text-red-400"
+          >
+            <LogOut size={15} />
+            Sign out
+          </button>
         </div>
       </aside>
 

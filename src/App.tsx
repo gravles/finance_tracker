@@ -1,5 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
+import AuthGuard from '@/components/AuthGuard'
 import AppLayout from '@/components/layout/AppLayout'
+import LoginPage from '@/pages/LoginPage'
 import DashboardPage from '@/pages/DashboardPage'
 import TransactionsPage from '@/pages/TransactionsPage'
 import SubscriptionsPage from '@/pages/SubscriptionsPage'
@@ -10,7 +12,14 @@ import ChatPage from '@/pages/ChatPage'
 export default function App() {
   return (
     <Routes>
-      <Route element={<AppLayout />}>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        element={
+          <AuthGuard>
+            <AppLayout />
+          </AuthGuard>
+        }
+      >
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard"      element={<DashboardPage />} />
         <Route path="/transactions"   element={<TransactionsPage />} />

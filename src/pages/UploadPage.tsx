@@ -100,7 +100,7 @@ export default function UploadPage() {
         onDragOver={e => { e.preventDefault(); setDragOver(true) }}
         onDragLeave={() => setDragOver(false)}
         onClick={() => inputRef.current?.click()}
-        className={`border-2 border-dashed rounded-xl p-12 flex flex-col items-center gap-4 cursor-pointer transition-colors ${
+        className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center gap-4 cursor-pointer transition-colors ${
           dragOver
             ? 'border-indigo-500 bg-indigo-500/5'
             : 'border-gray-700 hover:border-gray-600 hover:bg-gray-800/20'
@@ -109,7 +109,7 @@ export default function UploadPage() {
         <input
           ref={inputRef}
           type="file"
-          accept=".csv"
+          accept=".csv,text/csv,text/plain,application/csv"
           onChange={onFileChange}
           className="hidden"
         />
