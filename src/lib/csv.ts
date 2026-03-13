@@ -2,26 +2,86 @@ import Papa from 'papaparse'
 import { sha256 } from './utils'
 import { supabase } from './supabase'
 
-interface ImportResult {
+export interface ImportResult {
   imported: number
   skipped: number
   errors: string[]
 }
 
-// Simplifi TSV columns (as of 2025/2026 export):
-// Date | Account | Payee | Category | Tags | Exclusion | Amount
+export interface CsvPreflight {
+  ok: boolean
+  delimiter: string
+  rowCount: number
+  columns: string[]
+  missingColumns: string[]
+  dateFormat: string | null       // detected date format example
+  sampleRows: Record<string, string>[]
+  warnings: string[]
+}
 
-interface SimplifiRow {
-  Date: string
-  Account: string
-  Payee: string
-  Category: string
-  Tags: string
-  Exclusion: string   // "yes" = excluded from budget
-  Amount: string
-  // older export variants
-  'Account Name'?: string
-  Note?: string
+// Simplifi columns — required vs optional
+const REQUIRED_COLUMNS = ['Date', 'Payee', 'Amount']
+const OPTIONAL_COLUMNS = ['Account', 'Account Name', 'Category', 'Tags', 'Exclusion', 'Note']
+
+/**
+ * Analyse a file before import — returns diagnostics so the UI
+ * can show the user what was detected and catch problems early.
+ */
+export async function preflightCsv(file: File): Promise<CsvPreflight> {
+  const text = await file.text()
+  const warnings: string[] = []
+
+  const { data, meta, errors } = Papa.parse<Record<string, string>>(text, {
+    header: true,
+    delimiter: '',        // auto-detect
+    skipEmptyLines: true,
+    transformHeader: h => h.trim(),
+    preview: 5,           // only parse first 5 rows for preflight
+  })
+
+  const delimiter = meta.delimiter === '\t' ? 'tab' : `"${meta.delimiter}"`
+  const columns = meta.fields ?? []
+
+  const missingColumns = REQUIRED_COLUMNS.filter(
+    c => !columns.includes(c)
+  )
+
+  if (errors.length) {
+    warnings.push(...errors.slice(0, 3).map(e => `Parse warning: ${e.message}`))
+  }
+
+  // Try to detect date format from first non-empty date value
+  const firstDate = data.find(r => r.Date?.trim())?.Date?.trim() ?? null
+  const dateFormat = firstDate ? describeDateFormat(firstDate) : null
+
+  if (firstDate && !normalizeDate(firstDate)) {
+    warnings.push(`Unrecognised date format: "${firstDate}" — import may fail`)
+  }
+
+  // Check for Amount column with spaces (Simplifi adds a leading space)
+  const firstAmount = data.find(r => r.Amount?.trim())?.Amount ?? ''
+  if (firstAmount.startsWith(' ')) {
+    warnings.push('Amount column has leading spaces — will be trimmed automatically')
+  }
+
+  // Full row count (re-parse without preview limit just for count)
+  const { data: allData } = Papa.parse<Record<string, string>>(text, {
+    header: true,
+    delimiter: meta.delimiter,
+    skipEmptyLines: true,
+    transformHeader: h => h.trim(),
+  })
+
+  return {
+    ok: missingColumns.length === 0,
+    delimiter,
+    rowCount: allData.length,
+    columns,
+    missingColumns,
+    dateFormat,
+    sampleRows: data.slice(0, 3),
+    warnings,
+  }
 }
 
 export async function importSimplifiCsv(
@@ -30,9 +90,9 @@ export async function importSimplifiCsv(
 ): Promise<ImportResult> {
   const text = await file.text()
 
-  const { data, errors: parseErrors } = Papa.parse<SimplifiRow>(text, {
+  const { data, meta, errors: parseErrors } = Papa.parse<Record<string, string>>(text, {
     header: true,
-    delimiter: '',            // auto-detect: comma or tab
+    delimiter: '',
     skipEmptyLines: true,
     transformHeader: h => h.trim(),
   })
@@ -41,7 +101,6 @@ export async function importSimplifiCsv(
     return { imported: 0, skipped: 0, errors: parseErrors.map(e => e.message) }
   }
 
-  // Fetch accounts and categories for matching
   const { data: accounts } = await supabase.from('accounts').select('id, name')
   const accountMap = new Map((accounts ?? []).map(a => [a.name.toLowerCase(), a.id]))
 
@@ -54,24 +113,32 @@ export async function importSimplifiCsv(
 
   for (const row of data) {
     try {
-      const date = normalizeDate(row.Date?.trim())
+      const rawDate = row.Date?.trim() ?? ''
+      const date = normalizeDate(rawDate)
       const payee = row.Payee?.trim() ?? ''
       const rawAmount = row.Amount?.trim() ?? '0'
       const amount = parseFloat(rawAmount.replace(/[$,\s]/g, ''))
 
-      if (!date || !payee) {
-        errors.push(`Skipped — missing date or payee: ${JSON.stringify(row)}`)
+      if (!date) {
+        errors.push(`Unrecognised date "${rawDate}" for payee "${payee || '—'}"`)
+        continue
+      }
+      if (!payee) {
+        errors.push(`Missing payee on ${rawDate}`)
+        continue
+      }
+      if (isNaN(amount)) {
+        errors.push(`Invalid amount "${row.Amount}" for ${payee} on ${rawDate}`)
         continue
       }
 
-      const accountName = (row['Account Name'] ?? row.Account ?? '').trim()
+      const accountName = (row['Account Name'] ?? row['Account'] ?? '').trim()
       const account_id = accountMap.get(accountName.toLowerCase()) ?? null
 
-      const categoryName = row.Category?.trim() ?? ''
+      const categoryName = row['Category']?.trim() ?? ''
       const category_id = categoryMap.get(categoryName.toLowerCase()) ?? null
 
-      // Exclusion column: "yes" means the user excluded it in Simplifi
-      const is_ignored = row.Exclusion?.trim().toLowerCase() === 'yes'
+      const is_ignored = row['Exclusion']?.trim().toLowerCase() === 'yes'
 
       const importKey = `${date}|${payee}|${amount}|${accountName}`
       const import_hash = await sha256(importKey)
@@ -86,10 +153,10 @@ export async function importSimplifiCsv(
         date,
         payee,
         amount,
-        memo: row.Note?.trim() || null,
+        memo: row['Note']?.trim() || null,
         transaction_type: amount < 0 ? 'debit' : 'credit',
         merchant_name: null,
-        tags: row.Tags ? row.Tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [],
+        tags: row['Tags'] ? row['Tags'].split(',').map((t: string) => t.trim()).filter(Boolean) : [],
         is_recurring: false,
         is_transfer: false,
         is_ignored,
@@ -105,7 +172,6 @@ export async function importSimplifiCsv(
     }
   }
 
-  // Upsert in batches of 500
   let imported = 0
   let skipped = 0
   const BATCH = 500
@@ -125,45 +191,64 @@ export async function importSimplifiCsv(
     }
   }
 
+  // Surface delimiter info for debugging
+  if (meta.delimiter !== ',' && meta.delimiter !== '\t') {
+    errors.push(`Unexpected delimiter detected: "${meta.delimiter}"`)
+  }
+
   return { imported, skipped, errors }
 }
 
+// ─── Date normalisation ───────────────────────────────────────────────────────
+
 const MONTH_MAP: Record<string, string> = {
   jan:'01', feb:'02', mar:'03', apr:'04', may:'05', jun:'06',
-  jul:'07', aug:'08', sep:'09', oct:'10', nov:'11', dec:'12',
+  jul:'07', aug:'08', sep:'09', sept:'09', oct:'10', nov:'11', dec:'12',
+  january:'01', february:'02', march:'03', april:'04', june:'06',
+  july:'07', august:'08', september:'09', october:'10', november:'11', december:'12',
 }
 
 /**
- * Normalize Simplifi date formats to ISO 8601 (YYYY-MM-DD).
- *   13-Mar-26   → 2026-03-13  (Simplifi 2025+ export)
- *   13 Mar 2026 → 2026-03-13
- *   03/13/2026  → 2026-03-13
- *   2026-03-13  → 2026-03-13
+ * Normalise any Simplifi date variant to ISO YYYY-MM-DD.
+ *
+ *   30 Sept 2025  →  2025-09-30   (full 4-digit year, "Sept" variant)
+ *   13 Mar 2026   →  2026-03-13
+ *   13-Mar-26     →  2026-03-13   (2-digit year)
+ *   03/13/2026    →  2026-03-13
+ *   2026-03-13    →  already ISO
  */
-function normalizeDate(raw: string): string {
+export function normalizeDate(raw: string): string {
   if (!raw) return ''
+  const s = raw.trim()
 
-  // DD-Mon-YY  e.g. "13-Mar-26"
-  const dmyShort = raw.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/)
-  if (dmyShort) {
-    const month = MONTH_MAP[dmyShort[2].toLowerCase()]
-    const year = `20${dmyShort[3]}`   // 26 → 2026
-    if (month) return `${year}-${month}-${dmyShort[1].padStart(2, '0')}`
-  }
-
-  // DD Mon YYYY  e.g. "13 Mar 2026"
-  const dmyLong = raw.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$/)
+  // DD Mon(th) YYYY  — "30 Sept 2025", "13 Mar 2026", "1 January 2026"
+  const dmyLong = s.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/)
   if (dmyLong) {
     const month = MONTH_MAP[dmyLong[2].toLowerCase()]
     if (month) return `${dmyLong[3]}-${month}-${dmyLong[1].padStart(2, '0')}`
   }
 
+  // DD-Mon-YY  — "13-Mar-26"
+  const dmyShort = s.match(/^(\d{1,2})-([A-Za-z]+)-(\d{2})$/)
+  if (dmyShort) {
+    const month = MONTH_MAP[dmyShort[2].toLowerCase()]
+    const year = parseInt(dmyShort[3]) < 50 ? `20${dmyShort[3]}` : `19${dmyShort[3]}`
+    if (month) return `${year}-${month}-${dmyShort[1].padStart(2, '0')}`
+  }
+
   // MM/DD/YYYY
-  const mdy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
   if (mdy) return `${mdy[3]}-${mdy[1].padStart(2, '0')}-${mdy[2].padStart(2, '0')}`
 
-  // Already ISO YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
 
   return ''
+}
+
+function describeDateFormat(raw: string): string {
+  const normalized = normalizeDate(raw)
+  return normalized
+    ? `"${raw}" → ${normalized} ✓`
+    : `"${raw}" — format not recognised`
 }
