@@ -186,7 +186,7 @@ export async function importSimplifiCsv(
     const batch = rows.slice(i, i + BATCH)
     const { error, count } = await supabase
       .from('transactions')
-      .upsert(batch, { onConflict: 'import_hash', ignoreDuplicates: true })
+      .upsert(batch, { onConflict: 'import_hash', ignoreDuplicates: false })
       .select('id', { count: 'exact', head: true })
 
     if (error) {

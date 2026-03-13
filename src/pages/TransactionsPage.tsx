@@ -34,11 +34,7 @@ export default function TransactionsPage() {
     setLoading(false)
   }, [page, search])
 
-  useEffect(() => {
-    fetchTransactions()
-  }, [fetchTransactions])
-
-  // Reset to page 0 on search change
+  useEffect(() => { fetchTransactions() }, [fetchTransactions])
   useEffect(() => { setPage(0) }, [search])
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
@@ -64,15 +60,15 @@ export default function TransactionsPage() {
         />
       </div>
 
-      {/* Table */}
-      <div className="card p-0 overflow-hidden">
-        <table className="w-full text-sm">
+      {/* Table — horizontally scrollable on mobile */}
+      <div className="card p-0 overflow-x-auto">
+        <table className="w-full text-sm min-w-[500px]">
           <thead>
             <tr className="border-b border-gray-800 text-gray-400 text-xs">
               <th className="text-left px-4 py-3 font-medium">Date</th>
               <th className="text-left px-4 py-3 font-medium">Payee</th>
-              <th className="text-left px-4 py-3 font-medium">Category</th>
-              <th className="text-left px-4 py-3 font-medium">Account</th>
+              <th className="text-left px-4 py-3 font-medium hidden sm:table-cell">Category</th>
+              <th className="text-left px-4 py-3 font-medium hidden md:table-cell">Account</th>
               <th className="text-right px-4 py-3 font-medium">Amount</th>
             </tr>
           </thead>
@@ -88,39 +84,43 @@ export default function TransactionsPage() {
                 </td>
               </tr>
             ) : (
-              transactions.map(tx => (
-                <tr key={tx.id} className="hover:bg-gray-800/30 transition-colors">
-                  <td className="px-4 py-2.5 text-gray-400 font-mono text-xs whitespace-nowrap">
-                    {formatDate(tx.date)}
-                  </td>
-                  <td className="px-4 py-2.5 text-white max-w-[200px] truncate">
-                    {tx.payee}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    {tx.category ? (
-                      <span
-                        className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full"
-                        style={{
-                          backgroundColor: `${(tx.category as { color?: string }).color ?? '#6b7280'}22`,
-                          color: (tx.category as { color?: string }).color ?? '#6b7280',
-                        }}
-                      >
-                        {(tx.category as { name: string }).name}
-                      </span>
-                    ) : (
-                      <span className="text-gray-600 text-xs">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2.5 text-gray-400 text-xs">
-                    {tx.account ? (tx.account as { name: string }).name : '—'}
-                  </td>
-                  <td className={`px-4 py-2.5 text-right font-mono font-medium ${
-                    tx.amount >= 0 ? 'text-green-400' : 'text-white'
-                  }`}>
-                    {formatCAD(tx.amount)}
-                  </td>
-                </tr>
-              ))
+              transactions.map(tx => {
+                const cat = tx.category as { name: string; color: string | null } | null
+                const acc = tx.account as { name: string } | null
+                return (
+                  <tr key={tx.id} className="hover:bg-gray-800/30 transition-colors">
+                    <td className="px-4 py-2.5 text-gray-400 font-mono text-xs whitespace-nowrap">
+                      {formatDate(tx.date)}
+                    </td>
+                    <td className="px-4 py-2.5 text-white max-w-[160px] truncate">
+                      {tx.payee}
+                    </td>
+                    <td className="px-4 py-2.5 hidden sm:table-cell">
+                      {cat ? (
+                        <span
+                          className="inline-flex items-center text-xs px-2 py-0.5 rounded-full whitespace-nowrap"
+                          style={{
+                            backgroundColor: `${cat.color ?? '#6b7280'}22`,
+                            color: cat.color ?? '#6b7280',
+                          }}
+                        >
+                          {cat.name}
+                        </span>
+                      ) : (
+                        <span className="text-gray-700 text-xs">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-gray-500 text-xs hidden md:table-cell truncate max-w-[120px]">
+                      {acc?.name ?? '—'}
+                    </td>
+                    <td className={`px-4 py-2.5 text-right font-mono font-medium whitespace-nowrap ${
+                      tx.amount >= 0 ? 'text-green-400' : 'text-gray-100'
+                    }`}>
+                      {formatCAD(tx.amount)}
+                    </td>
+                  </tr>
+                )
+              })
             )}
           </tbody>
         </table>
