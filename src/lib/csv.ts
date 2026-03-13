@@ -107,6 +107,10 @@ export async function importSimplifiCsv(
   const { data: categories } = await supabase.from('categories').select('id, name')
   const categoryMap = new Map((categories ?? []).map(c => [c.name.toLowerCase(), c.id]))
 
+  // Alias map: Simplifi category strings → our category IDs
+  const { data: aliases } = await supabase.from('category_aliases').select('alias, category_id')
+  const aliasMap = new Map((aliases ?? []).map(a => [a.alias.toLowerCase(), a.category_id]))
+
   const rows: Record<string, unknown>[] = []
   const skippedHashes = new Set<string>()
   const errors: string[] = []
@@ -135,8 +139,10 @@ export async function importSimplifiCsv(
       const accountName = (row['Account Name'] ?? row['Account'] ?? '').trim()
       const account_id = accountMap.get(accountName.toLowerCase()) ?? null
 
-      const categoryName = row['Category']?.trim() ?? ''
-      const category_id = categoryMap.get(categoryName.toLowerCase()) ?? null
+      // Simplifi uses "Parent:Child" e.g. "Dining & Drinks:Coffee"
+      // Try: full string → child only → parent only → direct name match
+      const rawCategory = row['Category']?.trim() ?? ''
+      const category_id = resolveCategory(rawCategory, aliasMap, categoryMap)
 
       const is_ignored = row['Exclusion']?.trim().toLowerCase() === 'yes'
 
@@ -244,6 +250,47 @@ export function normalizeDate(raw: string): string {
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
 
   return ''
+}
+
+/**
+ * Resolve a Simplifi category string to one of our category IDs.
+ * Simplifi format: "Parent:Child" e.g. "Dining & Drinks:Coffee"
+ * Resolution order:
+ *   1. Full "parent:child" in alias map
+ *   2. Full string in alias map
+ *   3. Child part alone in alias map
+ *   4. Parent part alone in alias map
+ *   5. Direct name match in categories table
+ */
+function resolveCategory(
+  raw: string,
+  aliasMap: Map<string, string>,
+  categoryMap: Map<string, string>,
+): string | null {
+  if (!raw) return null
+  const lower = raw.toLowerCase()
+
+  // 1 & 2 — try the full string as-is in alias map
+  if (aliasMap.has(lower)) return aliasMap.get(lower)!
+
+  const colonIdx = lower.indexOf(':')
+  if (colonIdx !== -1) {
+    const parent = lower.slice(0, colonIdx).trim()
+    const child  = lower.slice(colonIdx + 1).trim()
+
+    // 3 — child alone
+    if (aliasMap.has(child)) return aliasMap.get(child)!
+    if (categoryMap.has(child)) return categoryMap.get(child)!
+
+    // 4 — parent alone
+    if (aliasMap.has(parent)) return aliasMap.get(parent)!
+    if (categoryMap.has(parent)) return categoryMap.get(parent)!
+  }
+
+  // 5 — direct name match
+  if (categoryMap.has(lower)) return categoryMap.get(lower)!
+
+  return null
 }
 
 function describeDateFormat(raw: string): string {

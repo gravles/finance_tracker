@@ -1,19 +1,15 @@
 /**
  * Vercel Edge Function: /api/chat
- * Proxies chat messages to Claude with finance context injected from Supabase.
- * Runs as an Edge Function for low latency streaming (streaming TODO in v2).
+ *
+ * Required env vars (set in Vercel dashboard — NOT VITE_ prefixed):
+ *   SUPABASE_URL              — your Supabase project URL
+ *   SUPABASE_SERVICE_ROLE_KEY — service role key (bypasses RLS)
+ *   ANTHROPIC_API_KEY         — Claude API key
  */
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 
 export const config = { runtime: 'edge' }
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
-
-const supabase = createClient(
-  process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.VITE_SUPABASE_ANON_KEY!,
-)
 
 interface ChatMessage {
   role: 'user' | 'assistant'
@@ -25,46 +21,136 @@ export default async function handler(req: Request): Promise<Response> {
     return new Response('Method not allowed', { status: 405 })
   }
 
+  const supabaseUrl = process.env.SUPABASE_URL
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const anthropicKey = process.env.ANTHROPIC_API_KEY
+
+  if (!supabaseUrl || !supabaseKey) {
+    return new Response(JSON.stringify({
+      reply: 'Chat is not configured yet. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Vercel environment variables.',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  if (!anthropicKey) {
+    return new Response(JSON.stringify({
+      reply: 'ANTHROPIC_API_KEY is not set in Vercel environment variables.',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+
   const { messages } = await req.json() as { messages: ChatMessage[] }
 
-  // Pull lightweight financial context to ground the model
+  const supabase = createClient(supabaseUrl, supabaseKey)
+  const anthropic = new Anthropic({ apiKey: anthropicKey })
+
+  // ── Pull financial context in parallel ────────────────────────────────────
+
+  const now = new Date()
+  const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1)
+    .toISOString().split('T')[0]
+
   const [
     { data: goals },
+    { data: incomeSources },
+    { data: subscriptions },
     { data: recentTx },
-    { data: subs },
-    { data: income },
+    { data: allTx },
   ] = await Promise.all([
-    supabase.from('goals').select('name, type, current_amount, target_amount, target_date').eq('is_active', true),
+    supabase.from('goals')
+      .select('name, type, description, current_amount, target_amount, target_date, currency')
+      .eq('is_active', true)
+      .order('sort_order'),
+
+    supabase.from('income_sources')
+      .select('name, type, gross_cad, frequency')
+      .eq('is_active', true),
+
+    supabase.from('subscriptions')
+      .select('merchant_name, amount, frequency, keep_flag, is_active')
+      .eq('is_active', true),
+
+    // Last 30 transactions verbatim for specific queries
     supabase.from('transactions')
       .select('date, payee, amount, category:categories(name)')
       .eq('is_ignored', false)
       .eq('is_transfer', false)
       .order('date', { ascending: false })
-      .limit(200),
-    supabase.from('subscriptions').select('merchant_name, amount, frequency, keep_flag').eq('is_active', true),
-    supabase.from('income_sources').select('name, type, gross_cad, frequency').eq('is_active', true),
+      .limit(30),
+
+    // All transactions in last 6 months for aggregation
+    supabase.from('transactions')
+      .select('date, amount, category:categories(name)')
+      .eq('is_ignored', false)
+      .eq('is_transfer', false)
+      .gte('date', sixMonthsAgo),
   ])
 
-  const systemPrompt = `You are a personal finance assistant for a user based in Ottawa, Ontario, Canada.
-You have access to their actual financial data. Answer questions accurately and concisely.
-Always show amounts in CAD. Use Canadian tax context (federal + Ontario provincial rates, CPP, EI).
+  // ── Aggregate spending by category × month ────────────────────────────────
+
+  type CatMonth = Record<string, Record<string, number>>
+  const spendByCatMonth: CatMonth = {}
+  const monthlyTotals: Record<string, { income: number; expenses: number }> = {}
+
+  for (const tx of allTx ?? []) {
+    const month = tx.date.slice(0, 7)
+    const catName = (tx.category as { name: string } | null)?.name ?? 'Uncategorized'
+    const amount = Number(tx.amount)
+
+    // Monthly income/expense totals
+    if (!monthlyTotals[month]) monthlyTotals[month] = { income: 0, expenses: 0 }
+    if (amount > 0) monthlyTotals[month].income += amount
+    else monthlyTotals[month].expenses += Math.abs(amount)
+
+    // Category × month spending (expenses only)
+    if (amount < 0) {
+      if (!spendByCatMonth[catName]) spendByCatMonth[catName] = {}
+      spendByCatMonth[catName][month] = (spendByCatMonth[catName][month] ?? 0) + Math.abs(amount)
+    }
+  }
+
+  // Sort months
+  const months = Object.keys(monthlyTotals).sort()
+  const monthlyTable = months.map(m => ({
+    month: m,
+    income: +monthlyTotals[m].income.toFixed(2),
+    expenses: +monthlyTotals[m].expenses.toFixed(2),
+    net: +(monthlyTotals[m].income - monthlyTotals[m].expenses).toFixed(2),
+  }))
+
+  // Top categories with per-month breakdown
+  const categoryBreakdown = Object.entries(spendByCatMonth)
+    .map(([cat, byMonth]) => ({
+      category: cat,
+      total: +Object.values(byMonth).reduce((s, v) => s + v, 0).toFixed(2),
+      byMonth: Object.fromEntries(
+        Object.entries(byMonth).map(([m, v]) => [m, +v.toFixed(2)])
+      ),
+    }))
+    .sort((a, b) => b.total - a.total)
+
+  const systemPrompt = `You are a personal finance assistant for a user in Ottawa, Ontario, Canada.
+You have access to their actual financial data below. Be concise and specific. Always use CAD.
+
+Use Canadian tax context: federal + Ontario provincial rates, CPP, EI premiums.
+For mortgage questions: use OSFI stress test (qualifying rate = contract rate + 2%, min 5.25%).
+Format money as $X,XXX.XX. Use markdown tables for comparisons.
 
 ## Income Sources
-${JSON.stringify(income ?? [], null, 2)}
+${JSON.stringify(incomeSources ?? [], null, 2)}
 
-## Goals
+## Financial Goals
 ${JSON.stringify(goals ?? [], null, 2)}
 
 ## Active Subscriptions
-${JSON.stringify(subs ?? [], null, 2)}
+${JSON.stringify(subscriptions ?? [], null, 2)}
 
-## Recent Transactions (last 200)
-${JSON.stringify(recentTx ?? [], null, 2)}
+## Monthly Income vs Expenses (last 6 months)
+${JSON.stringify(monthlyTable, null, 2)}
 
-When analysing spending, group by category and show month-over-month trends where relevant.
-For mortgage qualification questions, use current Ottawa market context and OSFI stress test rules (qualifying rate = contract rate + 2% or 5.25%, whichever is higher).
-For equalization payment questions, be sensitive and factual.
-Format numbers as currency. Use markdown tables for comparisons.`
+## Spending by Category (last 6 months, sorted by total)
+${JSON.stringify(categoryBreakdown, null, 2)}
+
+## 30 Most Recent Transactions
+${JSON.stringify(recentTx ?? [], null, 2)}`
 
   const response = await anthropic.messages.create({
     model: 'claude-opus-4-6',
