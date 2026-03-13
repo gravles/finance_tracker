@@ -28,14 +28,11 @@ export async function importSimplifiCsv(
   file: File,
   uploadId: string,
 ): Promise<ImportResult> {
-  // Read with Windows-1252 encoding (Simplifi's actual export encoding)
-  // This fixes garbled characters like Â® → ®
-  const buffer = await file.arrayBuffer()
-  const text = new TextDecoder('windows-1252').decode(buffer)
+  const text = await file.text()
 
   const { data, errors: parseErrors } = Papa.parse<SimplifiRow>(text, {
     header: true,
-    delimiter: '\t',          // Simplifi exports TSV, not CSV
+    delimiter: '',            // auto-detect: comma or tab
     skipEmptyLines: true,
     transformHeader: h => h.trim(),
   })
