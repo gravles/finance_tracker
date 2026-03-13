@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { TrendingDown, TrendingUp, Wallet, Target } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { formatCAD } from '@/lib/utils'
@@ -156,7 +156,7 @@ function KpiCard({
   sub,
   valueClass = 'text-white',
 }: {
-  icon: React.ReactNode
+  icon: ReactNode
   label: string
   value: string
   sub?: string
