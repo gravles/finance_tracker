@@ -1,7 +1,6 @@
 import Papa from 'papaparse'
 import { sha256 } from './utils'
 import { supabase } from './supabase'
-import type { SimplifiCsvRow, Transaction } from '@/types'
 
 interface ImportResult {
   imported: number
@@ -9,40 +8,50 @@ interface ImportResult {
   errors: string[]
 }
 
-/**
- * Parse a Quicken Simplifi CSV export and upsert transactions into Supabase.
- * Simplifi CSV columns (may vary slightly by export version):
- *   Date, Payee, Amount, "Account Name", Category, Tags, Note
- */
+// Simplifi TSV columns (as of 2025/2026 export):
+// Date | Account | Payee | Category | Tags | Exclusion | Amount
+
+interface SimplifiRow {
+  Date: string
+  Account: string
+  Payee: string
+  Category: string
+  Tags: string
+  Exclusion: string   // "yes" = excluded from budget
+  Amount: string
+  // older export variants
+  'Account Name'?: string
+  Note?: string
+}
+
 export async function importSimplifiCsv(
   file: File,
   uploadId: string,
 ): Promise<ImportResult> {
-  const text = await file.text()
+  // Read with Windows-1252 encoding (Simplifi's actual export encoding)
+  // This fixes garbled characters like Â® → ®
+  const buffer = await file.arrayBuffer()
+  const text = new TextDecoder('windows-1252').decode(buffer)
 
-  const { data, errors: parseErrors } = Papa.parse<SimplifiCsvRow>(text, {
+  const { data, errors: parseErrors } = Papa.parse<SimplifiRow>(text, {
     header: true,
+    delimiter: '\t',          // Simplifi exports TSV, not CSV
     skipEmptyLines: true,
     transformHeader: h => h.trim(),
   })
 
-  if (parseErrors.length) {
-    return {
-      imported: 0,
-      skipped: 0,
-      errors: parseErrors.map(e => e.message),
-    }
+  if (parseErrors.length && data.length === 0) {
+    return { imported: 0, skipped: 0, errors: parseErrors.map(e => e.message) }
   }
 
-  // Fetch existing accounts to match by name
+  // Fetch accounts and categories for matching
   const { data: accounts } = await supabase.from('accounts').select('id, name')
   const accountMap = new Map((accounts ?? []).map(a => [a.name.toLowerCase(), a.id]))
 
-  // Fetch categories to map by name
   const { data: categories } = await supabase.from('categories').select('id, name')
   const categoryMap = new Map((categories ?? []).map(c => [c.name.toLowerCase(), c.id]))
 
-  const rows: Omit<Transaction, 'account' | 'category'>[] = []
+  const rows: Record<string, unknown>[] = []
   const skippedHashes = new Set<string>()
   const errors: string[] = []
 
@@ -51,20 +60,21 @@ export async function importSimplifiCsv(
       const date = normalizeDate(row.Date?.trim())
       const payee = row.Payee?.trim() ?? ''
       const rawAmount = row.Amount?.trim() ?? '0'
-      // Simplifi exports expenses as negative, income as positive
-      const amount = parseFloat(rawAmount.replace(/[$,]/g, ''))
+      const amount = parseFloat(rawAmount.replace(/[$,\s]/g, ''))
 
       if (!date || !payee) {
-        errors.push(`Skipped row — missing date or payee: ${JSON.stringify(row)}`)
+        errors.push(`Skipped — missing date or payee: ${JSON.stringify(row)}`)
         continue
       }
 
-      // Simplifi uses "Account" or "Account Name" depending on export version
-      const accountName = (row['Account Name'] ?? (row as Record<string, string>)['Account'] ?? '').trim()
+      const accountName = (row['Account Name'] ?? row.Account ?? '').trim()
       const account_id = accountMap.get(accountName.toLowerCase()) ?? null
 
       const categoryName = row.Category?.trim() ?? ''
       const category_id = categoryMap.get(categoryName.toLowerCase()) ?? null
+
+      // Exclusion column: "yes" means the user excluded it in Simplifi
+      const is_ignored = row.Exclusion?.trim().toLowerCase() === 'yes'
 
       const importKey = `${date}|${payee}|${amount}|${accountName}`
       const import_hash = await sha256(importKey)
@@ -82,10 +92,10 @@ export async function importSimplifiCsv(
         memo: row.Note?.trim() || null,
         transaction_type: amount < 0 ? 'debit' : 'credit',
         merchant_name: null,
-        tags: row.Tags ? row.Tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+        tags: row.Tags ? row.Tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [],
         is_recurring: false,
         is_transfer: false,
-        is_ignored: false,
+        is_ignored,
         notes: null,
         upload_id: uploadId,
         simplifi_id: null,
@@ -98,7 +108,7 @@ export async function importSimplifiCsv(
     }
   }
 
-  // Upsert in batches of 500 to stay under Supabase payload limits
+  // Upsert in batches of 500
   let imported = 0
   let skipped = 0
   const BATCH = 500
@@ -111,7 +121,7 @@ export async function importSimplifiCsv(
       .select('id', { count: 'exact', head: true })
 
     if (error) {
-      errors.push(`DB upsert error: ${error.message}`)
+      errors.push(`DB error: ${error.message}`)
     } else {
       imported += count ?? 0
       skipped += batch.length - (count ?? 0)
@@ -127,27 +137,35 @@ const MONTH_MAP: Record<string, string> = {
 }
 
 /**
- * Normalize date formats to ISO 8601 (YYYY-MM-DD).
- * Handles:
- *   DD Mon YYYY  → "13 Mar 2026"
- *   MM/DD/YYYY   → "03/13/2026"
- *   YYYY-MM-DD   → already ISO
+ * Normalize Simplifi date formats to ISO 8601 (YYYY-MM-DD).
+ *   13-Mar-26   → 2026-03-13  (Simplifi 2025+ export)
+ *   13 Mar 2026 → 2026-03-13
+ *   03/13/2026  → 2026-03-13
+ *   2026-03-13  → 2026-03-13
  */
 function normalizeDate(raw: string): string {
   if (!raw) return ''
 
+  // DD-Mon-YY  e.g. "13-Mar-26"
+  const dmyShort = raw.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2})$/)
+  if (dmyShort) {
+    const month = MONTH_MAP[dmyShort[2].toLowerCase()]
+    const year = `20${dmyShort[3]}`   // 26 → 2026
+    if (month) return `${year}-${month}-${dmyShort[1].padStart(2, '0')}`
+  }
+
   // DD Mon YYYY  e.g. "13 Mar 2026"
-  const dmy = raw.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$/)
-  if (dmy) {
-    const month = MONTH_MAP[dmy[2].toLowerCase()]
-    if (month) return `${dmy[3]}-${month}-${dmy[1].padStart(2, '0')}`
+  const dmyLong = raw.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$/)
+  if (dmyLong) {
+    const month = MONTH_MAP[dmyLong[2].toLowerCase()]
+    if (month) return `${dmyLong[3]}-${month}-${dmyLong[1].padStart(2, '0')}`
   }
 
   // MM/DD/YYYY
   const mdy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
   if (mdy) return `${mdy[3]}-${mdy[1].padStart(2, '0')}-${mdy[2].padStart(2, '0')}`
 
-  // Already ISO
+  // Already ISO YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
 
   return ''
