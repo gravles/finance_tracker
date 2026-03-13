@@ -178,7 +178,8 @@ export interface SimplifiCsvRow {
   Date: string
   Payee: string
   Amount: string
-  'Account Name': string
+  'Account Name': string  // older exports
+  Account: string         // newer exports
   Category: string
   Tags: string
   Note: string

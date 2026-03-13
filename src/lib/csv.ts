@@ -59,7 +59,8 @@ export async function importSimplifiCsv(
         continue
       }
 
-      const accountName = row['Account Name']?.trim() ?? ''
+      // Simplifi uses "Account" or "Account Name" depending on export version
+      const accountName = (row['Account Name'] ?? (row as Record<string, string>)['Account'] ?? '').trim()
       const account_id = accountMap.get(accountName.toLowerCase()) ?? null
 
       const categoryName = row.Category?.trim() ?? ''
@@ -120,16 +121,34 @@ export async function importSimplifiCsv(
   return { imported, skipped, errors }
 }
 
+const MONTH_MAP: Record<string, string> = {
+  jan:'01', feb:'02', mar:'03', apr:'04', may:'05', jun:'06',
+  jul:'07', aug:'08', sep:'09', oct:'10', nov:'11', dec:'12',
+}
+
 /**
- * Normalize common date formats to ISO 8601 (YYYY-MM-DD).
- * Simplifi typically exports MM/DD/YYYY.
+ * Normalize date formats to ISO 8601 (YYYY-MM-DD).
+ * Handles:
+ *   DD Mon YYYY  → "13 Mar 2026"
+ *   MM/DD/YYYY   → "03/13/2026"
+ *   YYYY-MM-DD   → already ISO
  */
 function normalizeDate(raw: string): string {
   if (!raw) return ''
+
+  // DD Mon YYYY  e.g. "13 Mar 2026"
+  const dmy = raw.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$/)
+  if (dmy) {
+    const month = MONTH_MAP[dmy[2].toLowerCase()]
+    if (month) return `${dmy[3]}-${month}-${dmy[1].padStart(2, '0')}`
+  }
+
   // MM/DD/YYYY
   const mdy = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
   if (mdy) return `${mdy[3]}-${mdy[1].padStart(2, '0')}-${mdy[2].padStart(2, '0')}`
+
   // Already ISO
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
+
   return ''
 }
