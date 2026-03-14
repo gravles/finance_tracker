@@ -11,7 +11,7 @@ interface BatchResponse {
   proposals: Proposal[]
   anomalies: Anomaly[]
   hasMore: boolean
-  remaining: number
+  remaining: number | '…'
   estimatedCostCAD: number
   dryRun: boolean
   tokens?: { input: number; output: number }
@@ -81,7 +81,7 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
         state.totalProcessed += data.processed
         state.totalUpdated   += data.updated
         state.allAnomalies.push(...data.anomalies)
-        state.remaining       = data.remaining
+        state.remaining       = typeof data.remaining === 'number' ? data.remaining : 0
         state.totalCostCAD   += data.estimatedCostCAD
         hasMore = data.hasMore
 
@@ -242,27 +242,19 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
   // ── Running ───────────────────────────────────────────────────────────────
   if (stage.status === 'running') {
     const { state } = stage
-    const pct = state.remaining > 0
-      ? Math.round((state.totalProcessed / (state.totalProcessed + state.remaining)) * 100)
-      : 99
     return (
       <div className="space-y-3">
         <div className="flex items-center gap-3 text-sm text-gray-300">
           <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-          <span>
-            {state.totalProcessed.toLocaleString()} analyzed
-            {state.remaining > 0 && ` · ${state.remaining.toLocaleString()} remaining`}
-          </span>
+          <span>{state.totalProcessed.toLocaleString()} transactions analyzed…</span>
         </div>
-        <div className="w-full bg-gray-800 rounded-full h-1.5">
-          <div
-            className="bg-indigo-500 h-1.5 rounded-full transition-all duration-500"
-            style={{ width: `${pct}%` }}
-          />
+        {/* Indeterminate progress bar — no expensive COUNT query */}
+        <div className="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+          <div className="h-1.5 bg-indigo-500 rounded-full animate-pulse w-full opacity-60" />
         </div>
         <div className="flex justify-between text-xs text-gray-600">
-          <span>{pct}% complete</span>
-          <span>~${state.totalCostCAD.toFixed(3)} CAD so far</span>
+          <span>{state.allAnomalies.length} anomalies found so far</span>
+          <span>~${state.totalCostCAD.toFixed(3)} CAD</span>
         </div>
       </div>
     )

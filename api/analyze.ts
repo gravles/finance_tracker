@@ -21,7 +21,7 @@ import { createClient } from '@supabase/supabase-js'
 export const config = { runtime: 'edge' }
 
 const HAIKU  = 'claude-haiku-4-5-20251001'
-const BATCH  = 50
+const BATCH  = 30  // conservative — leaves ~10s margin within 25s Edge limit
 
 // Rough token cost estimates (USD, converted to CAD ~1.38)
 const HAIKU_IN_PER_1M  = 0.80
@@ -83,38 +83,42 @@ export default async function handler(req: Request): Promise<Response> {
   const supabase  = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
   const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
 
-  // ── Categories ────────────────────────────────────────────────────────────
-  const [{ data: categories }, { data: parentCats }] = await Promise.all([
-    supabase.from('categories').select('id, name, parent_id'),
-    supabase.from('categories').select('id, name').is('parent_id', null),
-  ])
-
-  const parentMap   = new Map((parentCats ?? []).map(c => [c.id, c.name]))
-  const categoryList = (categories ?? []).map(c => ({
-    id: c.id,
-    name: c.parent_id ? `${parentMap.get(c.parent_id) ?? ''} > ${c.name}` : c.name,
-  }))
-  const catNameById = new Map(categoryList.map(c => [c.id, c.name]))
-
-  // ── Fetch batch ───────────────────────────────────────────────────────────
-  let query = supabase
+  // ── Categories + transactions in parallel ─────────────────────────────────
+  // Single categories query with self-join avoidance — fetch all, build map in JS
+  // No count: 'exact' on transactions — scanning 6k rows for a count adds ~2s per call
+  let txQuery = supabase
     .from('transactions')
-    .select('id, date, payee, amount, memo, category_id, merchant_name', { count: 'exact' })
+    .select('id, date, payee, amount, memo, category_id, merchant_name')
     .eq('is_ignored', false)
     .eq('is_transfer', false)
     .order('date', { ascending: false })
     .limit(batchSize)
 
-  // In non-force mode: only transactions missing category OR merchant name
   if (!force) {
-    query = query.or('category_id.is.null,merchant_name.is.null')
+    txQuery = txQuery.or('category_id.is.null,merchant_name.is.null')
   }
 
-  const { data: transactions, count: totalRemaining, error } = await query
-  if (error) return json({ error: error.message }, 500)
+  const [{ data: categories, error: catError }, { data: transactions, error: txError }] =
+    await Promise.all([
+      supabase.from('categories').select('id, name, parent_id'),
+      txQuery,
+    ])
+
+  if (catError) return json({ error: catError.message }, 500)
+  if (txError)  return json({ error: txError.message }, 500)
   if (!transactions?.length) {
     return json({ processed: 0, updated: 0, proposals: [], anomalies: [], hasMore: false, remaining: 0, estimatedCostCAD: 0 })
   }
+
+  // Build category maps in JS (no second DB round trip)
+  const parentMap = new Map(
+    (categories ?? []).filter(c => !c.parent_id).map(c => [c.id, c.name])
+  )
+  const categoryList = (categories ?? []).map(c => ({
+    id: c.id,
+    name: c.parent_id ? `${parentMap.get(c.parent_id) ?? ''} > ${c.name}` : c.name,
+  }))
+  const catNameById = new Map(categoryList.map(c => [c.id, c.name]))
 
   // ── Call Haiku ────────────────────────────────────────────────────────────
   const txList = transactions as TxRow[]
@@ -191,15 +195,16 @@ export default async function handler(req: Request): Promise<Response> {
     }
   }
 
-  const remaining = Math.max(0, (totalRemaining ?? 0) - txList.length)
+  // hasMore: if we got a full batch there are likely more — no expensive COUNT needed
+  const hasMore = txList.length === batchSize
 
   return json({
     processed: txList.length,
     updated: dryRun ? 0 : updated,
     proposals: dryRun ? proposals : [],
     anomalies,
-    hasMore: remaining > 0,
-    remaining,
+    hasMore,
+    remaining: hasMore ? '…' : 0,  // exact count avoided intentionally
     estimatedCostCAD,
     dryRun,
     tokens: { input: inputTokens, output: outputTokens },
