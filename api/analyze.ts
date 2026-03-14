@@ -1,160 +1,255 @@
 /**
  * POST /api/analyze
  *
- * Processes ONE batch of transactions per call to stay within
- * Vercel Edge Function's 25s timeout. The client loops until
- * hasMore === false.
+ * Claude-powered transaction analysis.
+ * One batch per request (50 tx) to stay under Edge 25s timeout.
+ * Client loops until hasMore === false.
  *
- * Request:  { force?: bool, batchSize?: number }
- * Response: { processed, updated, anomalies, hasMore, remaining }
+ * Models:
+ *   Haiku  — bulk categorization (~$0.01/batch, ~$1.20 for 6k tx)
+ *   Opus   — anomaly explanations only (invoked rarely)
+ *
+ * Request:
+ *   { dryRun?: bool, force?: bool, batchSize?: number }
+ *
+ * Response:
+ *   { processed, updated, proposals?, anomalies, hasMore, remaining, estimatedCostCAD }
  */
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 
 export const config = { runtime: 'edge' }
 
-const DEFAULT_BATCH = 50
+const HAIKU  = 'claude-haiku-4-5-20251001'
+const BATCH  = 50
 
-interface ClaudeTransaction {
+// Rough token cost estimates (USD, converted to CAD ~1.38)
+const HAIKU_IN_PER_1M  = 0.80
+const HAIKU_OUT_PER_1M = 4.00
+const USD_TO_CAD       = 1.38
+
+interface TxRow {
   id: string
+  date: string
+  payee: string
+  amount: number
+  memo: string | null
   category_id: string | null
   merchant_name: string | null
+}
+
+interface ClaudeResult {
+  id: string
+  category_id: string | null
+  merchant_name: string
   is_recurring: boolean
   anomaly: string | null
   tags: string[]
+  confidence: 'high' | 'medium' | 'low'
+}
+
+export interface Proposal {
+  id: string
+  date: string
+  payee: string
+  amount: number
+  current_category: string | null
+  proposed_category: string | null
+  proposed_category_id: string | null
+  merchant_name: string
+  is_recurring: boolean
+  anomaly: string | null
+  confidence: 'high' | 'medium' | 'low'
 }
 
 export default async function handler(req: Request): Promise<Response> {
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
 
-  const supabaseUrl = process.env.SUPABASE_URL
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  const anthropicKey = process.env.ANTHROPIC_API_KEY
-
-  if (!supabaseUrl || !supabaseKey || !anthropicKey) {
-    return json({ error: 'Missing env vars' }, 500)
+  const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY } = process.env
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !ANTHROPIC_API_KEY) {
+    return json({ error: 'Missing env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY' }, 500)
   }
 
-  const body = await req.json().catch(() => ({})) as { force?: boolean; batchSize?: number }
-  const force = body.force ?? false
-  const batchSize = Math.min(body.batchSize ?? DEFAULT_BATCH, 75)
+  const body = await req.json().catch(() => ({})) as {
+    dryRun?: boolean
+    force?: boolean
+    batchSize?: number
+  }
 
-  const supabase = createClient(supabaseUrl, supabaseKey)
-  const anthropic = new Anthropic({ apiKey: anthropicKey })
+  const dryRun    = body.dryRun ?? false
+  const force     = body.force ?? false
+  const batchSize = Math.min(body.batchSize ?? BATCH, 75)
+
+  const supabase  = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+  const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
 
   // ── Categories ────────────────────────────────────────────────────────────
-  const { data: categories } = await supabase
-    .from('categories')
-    .select('id, name, parent_id')
+  const [{ data: categories }, { data: parentCats }] = await Promise.all([
+    supabase.from('categories').select('id, name, parent_id'),
+    supabase.from('categories').select('id, name').is('parent_id', null),
+  ])
 
-  const { data: parentCats } = await supabase
-    .from('categories')
-    .select('id, name')
-    .is('parent_id', null)
-
-  const parentMap = new Map((parentCats ?? []).map(c => [c.id, c.name]))
+  const parentMap   = new Map((parentCats ?? []).map(c => [c.id, c.name]))
   const categoryList = (categories ?? []).map(c => ({
     id: c.id,
     name: c.parent_id ? `${parentMap.get(c.parent_id) ?? ''} > ${c.name}` : c.name,
   }))
+  const catNameById = new Map(categoryList.map(c => [c.id, c.name]))
 
-  // ── Fetch ONE batch ───────────────────────────────────────────────────────
+  // ── Fetch batch ───────────────────────────────────────────────────────────
   let query = supabase
     .from('transactions')
-    .select('id, date, payee, amount, memo, category_id', { count: 'exact' })
+    .select('id, date, payee, amount, memo, category_id, merchant_name', { count: 'exact' })
     .eq('is_ignored', false)
     .eq('is_transfer', false)
     .order('date', { ascending: false })
     .limit(batchSize)
 
-  if (!force) query = query.is('category_id', null)
+  // In non-force mode: only transactions missing category OR merchant name
+  if (!force) {
+    query = query.or('category_id.is.null,merchant_name.is.null')
+  }
 
   const { data: transactions, count: totalRemaining, error } = await query
   if (error) return json({ error: error.message }, 500)
-  if (!transactions?.length) return json({ processed: 0, updated: 0, anomalies: [], hasMore: false, remaining: 0 })
+  if (!transactions?.length) {
+    return json({ processed: 0, updated: 0, proposals: [], anomalies: [], hasMore: false, remaining: 0, estimatedCostCAD: 0 })
+  }
 
-  // ── Single Claude call ────────────────────────────────────────────────────
-  let claudeResult: ClaudeTransaction[] = []
+  // ── Call Haiku ────────────────────────────────────────────────────────────
+  const txList = transactions as TxRow[]
 
   const response = await anthropic.messages.create({
-    model: 'claude-opus-4-6',
+    model: HAIKU,
     max_tokens: 4096,
-    system: `You are a financial data analyst for a user in Ottawa, Canada.
-Categorize transactions, normalize merchant names, detect recurring charges, flag anomalies.
-Respond with valid JSON array only — no prose, no markdown fences.`,
-    messages: [{
-      role: 'user',
-      content: buildPrompt(transactions, categoryList),
-    }],
+    system: buildSystem(),
+    messages: [{ role: 'user', content: buildPrompt(txList, categoryList) }],
   })
 
+  const inputTokens  = response.usage.input_tokens
+  const outputTokens = response.usage.output_tokens
+  const costUSD = (inputTokens / 1_000_000 * HAIKU_IN_PER_1M) + (outputTokens / 1_000_000 * HAIKU_OUT_PER_1M)
+  const estimatedCostCAD = +(costUSD * USD_TO_CAD).toFixed(4)
+
+  let claudeResults: ClaudeResult[] = []
   const text = response.content[0].type === 'text' ? response.content[0].text : ''
-  const jsonMatch = text.match(/\[[\s\S]*\]/)
-  if (jsonMatch) {
-    try { claudeResult = JSON.parse(jsonMatch[0]) } catch { /* ignore parse error */ }
+  const match = text.match(/\[[\s\S]*\]/)
+  if (match) {
+    try { claudeResults = JSON.parse(match[0]) } catch { /* ignore */ }
   }
 
-  // ── Write back ────────────────────────────────────────────────────────────
-  const updates = claudeResult
+  // ── Build proposals (dry run returns these for review) ────────────────────
+  const proposals: Proposal[] = claudeResults
     .filter(r => r.id)
-    .map(r => ({
-      id: r.id,
-      category_id: r.category_id ?? null,
-      merchant_name: r.merchant_name ?? null,
-      is_recurring: r.is_recurring ?? false,
-      tags: r.tags ?? [],
-      notes: r.anomaly ?? null,
-    }))
-
-  let updated = 0
-  if (updates.length) {
-    const { count } = await supabase
-      .from('transactions')
-      .upsert(updates, { onConflict: 'id' })
-      .select('id', { count: 'exact', head: true })
-    updated = count ?? 0
-  }
-
-  const anomalies = claudeResult
-    .filter(r => r.anomaly)
     .map(r => {
-      const tx = transactions.find(t => t.id === r.id)
-      return { payee: tx?.payee ?? '', date: tx?.date ?? '', amount: tx?.amount ?? 0, note: r.anomaly! }
+      const tx = txList.find(t => t.id === r.id)
+      return {
+        id: r.id,
+        date: tx?.date ?? '',
+        payee: tx?.payee ?? '',
+        amount: tx?.amount ?? 0,
+        current_category: tx?.category_id ? catNameById.get(tx.category_id) ?? null : null,
+        proposed_category: r.category_id ? catNameById.get(r.category_id) ?? null : null,
+        proposed_category_id: r.category_id,
+        merchant_name: r.merchant_name,
+        is_recurring: r.is_recurring ?? false,
+        anomaly: r.anomaly ?? null,
+        confidence: r.confidence ?? 'medium',
+      }
     })
 
-  // remaining = total matching - what we just processed
-  const remaining = Math.max(0, (totalRemaining ?? 0) - transactions.length)
+  const anomalies = proposals.filter(p => p.anomaly)
 
-  return json({ processed: transactions.length, updated, anomalies, hasMore: remaining > 0, remaining })
+  // ── Write results (skipped in dry run) ───────────────────────────────────
+  let updated = 0
+  if (!dryRun) {
+    const updates = proposals.map(p => ({
+      id: p.id,
+      category_id: p.proposed_category_id,
+      merchant_name: p.merchant_name || null,
+      is_recurring: p.is_recurring,
+      tags: [],
+      notes: p.anomaly ?? null,
+    }))
+
+    if (updates.length) {
+      const { count } = await supabase
+        .from('transactions')
+        .upsert(updates, { onConflict: 'id' })
+        .select('id', { count: 'exact', head: true })
+      updated = count ?? 0
+    }
+  }
+
+  const remaining = Math.max(0, (totalRemaining ?? 0) - txList.length)
+
+  return json({
+    processed: txList.length,
+    updated: dryRun ? 0 : updated,
+    proposals: dryRun ? proposals : [],
+    anomalies,
+    hasMore: remaining > 0,
+    remaining,
+    estimatedCostCAD,
+    dryRun,
+    tokens: { input: inputTokens, output: outputTokens },
+  })
+}
+
+function buildSystem(): string {
+  return `You are a financial transaction analyst for a user in Ottawa, Ontario, Canada.
+You categorize transactions accurately, normalize merchant names, and detect subscriptions.
+Respond with a valid JSON array only — no prose, no markdown, no code fences.`
 }
 
 function buildPrompt(
-  transactions: { id: string; date: string; payee: string; amount: number; memo: string | null }[],
+  transactions: TxRow[],
   categories: { id: string; name: string }[],
 ): string {
-  return `Analyze these ${transactions.length} financial transactions for a user in Ottawa, Canada.
+  // Compact category list to save tokens — use short IDs
+  const catList = categories.map(c => `${c.id.slice(0, 8)} ${c.name}`).join('\n')
 
-## Available Categories
-${JSON.stringify(categories, null, 2)}
+  const txData = transactions.map(t => ({
+    id: t.id,
+    date: t.date,
+    p: t.payee,      // short key = fewer tokens
+    amt: t.amount,
+    memo: t.memo || undefined,
+  }))
 
-## Transactions
-${JSON.stringify(transactions.map(t => ({ id: t.id, date: t.date, payee: t.payee, amount: t.amount, memo: t.memo })), null, 2)}
+  return `Categorize ${transactions.length} Canadian transactions. Ottawa user: ~$184k salary + $24k rental income.
 
-## Instructions
-Return a JSON array, one object per transaction:
-- id: unchanged UUID
-- category_id: best matching UUID from categories (null only if truly unclassifiable)
-- merchant_name: clean human-readable name. Strip store numbers, locations, card codes.
-  "AMZN MKTP CA*1234" → "Amazon", "TIM HORTONS #492 OTTAWA ON" → "Tim Hortons",
-  "NETFLIX.COM" → "Netflix", "ENERCARE HOME SERV" → "Enercare"
-- is_recurring: true for subscriptions, bills, insurance, utilities, gym memberships
-- anomaly: null normally. Short string for: charges >$1000 (non-rent/mortgage),
-  suspected duplicates, unrecognized foreign merchants, anything suspicious
-- tags: array from ["recurring","anomaly","large-purchase","travel","tax-deductible","rental-expense","business"]
+CATEGORIES (id_prefix name):
+${catList}
 
-User context: ~$184k salary + $24k rental income. Negative = expense, positive = income/refund.
-Common merchants: Loblaws, Metro, FreshCo, Canadian Tire, LCBO, WestJet, Air Canada, Uber Eats.
+TRANSACTIONS:
+${JSON.stringify(txData)}
 
+Return JSON array, one object per transaction:
+{
+  "id": "<full uuid>",
+  "category_id": "<full uuid from categories, or null if truly unclassifiable>",
+  "merchant_name": "<clean readable name, strip store#/location/card codes>",
+  "is_recurring": <true if subscription/bill/insurance/utility/membership>,
+  "anomaly": <null or short string if: >$800 non-housing, suspected duplicate, foreign charge>,
+  "confidence": "high"|"medium"|"low"
+}
+
+Merchant normalization examples:
+"AMZN MKTP CA*1234" → "Amazon"
+"TIM HORTONS #492 OTTAWA ON" → "Tim Hortons"
+"PAYBYPHONE PARKING" → "PayByPhone"
+"NETFLIX.COM" → "Netflix"
+"PAYPAL *BAMBULAB" → "Bambu Lab"
+"BELL MEDIA" → "Bell Media" (Entertainment, NOT food)
+"FIZZ (TX. INCL.) MONTREAL QC" → "Fizz Mobile"
+"EFT MANULIFE" → "Manulife"
+"ZWIFT INC" → "Zwift"
+
+Common Ottawa merchants: Loblaws, Metro, FreshCo, Farm Boy, LCBO, Beer Store,
+Canadian Tire, Sport Chek, Dollarama, Rideau Centre, Bayshore Shopping Centre.
+
+Negative amount = expense. Positive = income or refund.
 Return ONLY the JSON array.`
 }
 

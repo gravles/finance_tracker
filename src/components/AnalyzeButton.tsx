@@ -1,20 +1,20 @@
 import { useState } from 'react'
-import { Sparkles, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react'
+import { Sparkles, AlertTriangle, CheckCircle2, RefreshCw, Eye, Zap } from 'lucide-react'
 import { formatCAD } from '@/lib/utils'
+import type { Proposal } from '../../api/analyze'
 
-interface Anomaly {
-  payee: string
-  date: string
-  amount: number
-  note: string
-}
+interface Anomaly { payee: string; date: string; amount: number; note: string }
 
 interface BatchResponse {
   processed: number
   updated: number
+  proposals: Proposal[]
   anomalies: Anomaly[]
   hasMore: boolean
   remaining: number
+  estimatedCostCAD: number
+  dryRun: boolean
+  tokens?: { input: number; output: number }
   error?: string
 }
 
@@ -23,7 +23,7 @@ interface RunState {
   totalUpdated: number
   allAnomalies: Anomaly[]
   remaining: number
-  batches: number
+  totalCostCAD: number
 }
 
 interface Props {
@@ -32,67 +32,89 @@ interface Props {
   onComplete?: () => void
 }
 
-export default function AnalyzeButton({ force = false, label, onComplete }: Props) {
-  const [stage, setStage] = useState<
-    | { status: 'idle' }
-    | { status: 'running'; state: RunState }
-    | { status: 'done'; state: RunState }
-    | { status: 'error'; message: string }
-  >({ status: 'idle' })
+type Stage =
+  | { status: 'idle' }
+  | { status: 'dry-running' }
+  | { status: 'dry-done'; proposals: Proposal[]; costCAD: number }
+  | { status: 'running'; state: RunState }
+  | { status: 'done'; state: RunState }
+  | { status: 'error'; message: string }
 
-  async function run() {
-    const runState: RunState = { totalProcessed: 0, totalUpdated: 0, allAnomalies: [], remaining: 0, batches: 0 }
-    setStage({ status: 'running', state: { ...runState } })
+export default function AnalyzeButton({ force = false, label, onComplete }: Props) {
+  const [stage, setStage] = useState<Stage>({ status: 'idle' })
+
+  // ── Dry run: fetch ONE batch, show proposals for validation ──────────────
+  async function runDry() {
+    setStage({ status: 'dry-running' })
+    try {
+      const res = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dryRun: true, force, batchSize: 20 }),
+      })
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      const data = await res.json() as BatchResponse
+      if (data.error) throw new Error(data.error)
+      setStage({ status: 'dry-done', proposals: data.proposals, costCAD: data.estimatedCostCAD })
+    } catch (e) {
+      setStage({ status: 'error', message: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  // ── Full run: loop until hasMore === false ────────────────────────────────
+  async function runFull() {
+    const state: RunState = { totalProcessed: 0, totalUpdated: 0, allAnomalies: [], remaining: 0, totalCostCAD: 0 }
+    setStage({ status: 'running', state: { ...state } })
 
     let hasMore = true
-
     while (hasMore) {
-      let result: BatchResponse
       try {
         const res = await fetch('/api/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ force, batchSize: 50 }),
+          body: JSON.stringify({ dryRun: false, force, batchSize: 50 }),
         })
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-        result = await res.json() as BatchResponse
+        const data = await res.json() as BatchResponse
+        if (data.error) throw new Error(data.error)
+
+        state.totalProcessed += data.processed
+        state.totalUpdated   += data.updated
+        state.allAnomalies.push(...data.anomalies)
+        state.remaining       = data.remaining
+        state.totalCostCAD   += data.estimatedCostCAD
+        hasMore = data.hasMore
+
+        setStage({ status: 'running', state: { ...state } })
+        if (data.processed === 0) break
       } catch (e) {
         setStage({ status: 'error', message: e instanceof Error ? e.message : String(e) })
         return
       }
-
-      if (result.error) {
-        setStage({ status: 'error', message: result.error })
-        return
-      }
-
-      runState.totalProcessed += result.processed
-      runState.totalUpdated  += result.updated
-      runState.allAnomalies.push(...result.anomalies)
-      runState.remaining      = result.remaining
-      runState.batches       += 1
-      hasMore = result.hasMore
-
-      setStage({ status: 'running', state: { ...runState } })
-
-      // If nothing was processed this batch, stop to avoid infinite loop
-      if (result.processed === 0) break
     }
 
-    setStage({ status: 'done', state: { ...runState } })
+    setStage({ status: 'done', state: { ...state } })
     onComplete?.()
   }
 
+  // ── Idle ──────────────────────────────────────────────────────────────────
   if (stage.status === 'idle' || stage.status === 'error') {
     return (
       <div className="space-y-2">
-        <button
-          onClick={run}
-          className="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
-        >
-          <Sparkles size={15} />
-          {label ?? 'Analyze with Claude'}
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={runDry}
+            className="flex items-center gap-2 px-3 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            <Eye size={14} /> Dry run (preview 20)
+          </button>
+          <button
+            onClick={runFull}
+            className="flex items-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            <Sparkles size={14} /> {label ?? 'Analyze all'}
+          </button>
+        </div>
         {stage.status === 'error' && (
           <p className="text-xs text-red-400">{stage.message}</p>
         )}
@@ -100,73 +122,183 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
     )
   }
 
-  if (stage.status === 'running') {
-    const { state } = stage
+  // ── Dry running spinner ───────────────────────────────────────────────────
+  if (stage.status === 'dry-running') {
     return (
-      <div className="space-y-3">
-        <div className="flex items-center gap-3 text-sm text-gray-300">
-          <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
-          <span>
-            Analyzing… {state.totalProcessed} done
-            {state.remaining > 0 && `, ${state.remaining} remaining`}
+      <div className="flex items-center gap-2 text-sm text-gray-300 py-1">
+        <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+        Previewing 20 transactions…
+      </div>
+    )
+  }
+
+  // ── Dry run results ───────────────────────────────────────────────────────
+  if (stage.status === 'dry-done') {
+    const { proposals, costCAD } = stage
+    const recurring  = proposals.filter(p => p.is_recurring)
+    const anomalies  = proposals.filter(p => p.anomaly)
+    const recatted   = proposals.filter(p => p.current_category !== p.proposed_category)
+
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <p className="text-sm font-medium text-white">
+            Preview — {proposals.length} transactions
+          </p>
+          <span className="text-xs text-gray-500 font-mono">
+            This batch: ~${costCAD.toFixed(4)} CAD
           </span>
         </div>
-        {/* Progress bar */}
-        {state.remaining > 0 && (
-          <div className="w-full bg-gray-800 rounded-full h-1.5">
-            <div
-              className="bg-indigo-500 h-1.5 rounded-full transition-all duration-500"
-              style={{
-                width: `${Math.round(
-                  (state.totalProcessed / (state.totalProcessed + state.remaining)) * 100
-                )}%`,
-              }}
-            />
-          </div>
-        )}
-        <p className="text-xs text-gray-500">
-          Claude is categorizing transactions, cleaning merchant names, and looking for anomalies…
+
+        {/* Summary chips */}
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span className="px-2 py-1 bg-indigo-500/15 text-indigo-300 rounded-full">
+            {recatted.length} re-categorized
+          </span>
+          <span className="px-2 py-1 bg-green-500/15 text-green-400 rounded-full">
+            {recurring.length} recurring detected
+          </span>
+          {anomalies.length > 0 && (
+            <span className="px-2 py-1 bg-amber-500/15 text-amber-400 rounded-full">
+              {anomalies.length} anomalies
+            </span>
+          )}
+        </div>
+
+        {/* Proposal table */}
+        <div className="overflow-x-auto rounded-lg border border-gray-800">
+          <table className="w-full text-xs min-w-[520px]">
+            <thead>
+              <tr className="border-b border-gray-800 text-gray-500">
+                <th className="text-left px-3 py-2 font-medium">Payee → Merchant</th>
+                <th className="text-left px-3 py-2 font-medium">Category</th>
+                <th className="text-left px-3 py-2 font-medium">Flags</th>
+                <th className="text-right px-3 py-2 font-medium">Amount</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800/50">
+              {proposals.map(p => (
+                <tr key={p.id} className="hover:bg-gray-800/20">
+                  <td className="px-3 py-2">
+                    <div className="text-gray-400 truncate max-w-[160px]">{p.payee}</div>
+                    <div className="text-white font-medium">{p.merchant_name}</div>
+                  </td>
+                  <td className="px-3 py-2 max-w-[140px]">
+                    {p.current_category && p.current_category !== p.proposed_category && (
+                      <div className="text-gray-600 line-through truncate">{p.current_category}</div>
+                    )}
+                    <div className={p.current_category !== p.proposed_category ? 'text-indigo-300' : 'text-gray-300'}>
+                      {p.proposed_category ?? '—'}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex flex-col gap-0.5">
+                      {p.is_recurring && (
+                        <span className="text-green-400">↺ recurring</span>
+                      )}
+                      {p.anomaly && (
+                        <span className="text-amber-400 flex items-center gap-1">
+                          <AlertTriangle size={10} /> {p.anomaly}
+                        </span>
+                      )}
+                      {p.confidence === 'low' && (
+                        <span className="text-gray-600">? low confidence</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${
+                    p.amount >= 0 ? 'text-green-400' : 'text-gray-200'
+                  }`}>
+                    {formatCAD(p.amount)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Actions */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <button
+            onClick={runFull}
+            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            <Zap size={14} /> Looks good — analyze all ~6,000
+          </button>
+          <button
+            onClick={() => setStage({ status: 'idle' })}
+            className="text-sm text-gray-500 hover:text-gray-300"
+          >
+            Cancel
+          </button>
+        </div>
+        <p className="text-xs text-gray-600">
+          Full run estimated: ~$1.20–1.50 CAD for 6,000 transactions (Haiku model)
         </p>
       </div>
     )
   }
 
-  // Done
+  // ── Running ───────────────────────────────────────────────────────────────
+  if (stage.status === 'running') {
+    const { state } = stage
+    const pct = state.remaining > 0
+      ? Math.round((state.totalProcessed / (state.totalProcessed + state.remaining)) * 100)
+      : 99
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-3 text-sm text-gray-300">
+          <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+          <span>
+            {state.totalProcessed.toLocaleString()} analyzed
+            {state.remaining > 0 && ` · ${state.remaining.toLocaleString()} remaining`}
+          </span>
+        </div>
+        <div className="w-full bg-gray-800 rounded-full h-1.5">
+          <div
+            className="bg-indigo-500 h-1.5 rounded-full transition-all duration-500"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <div className="flex justify-between text-xs text-gray-600">
+          <span>{pct}% complete</span>
+          <span>~${state.totalCostCAD.toFixed(3)} CAD so far</span>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Done ──────────────────────────────────────────────────────────────────
   const { state } = stage
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <div className="flex items-center gap-2 text-green-400 text-sm font-medium">
-        <CheckCircle2 size={16} />
-        Analysis complete
+        <CheckCircle2 size={16} /> Analysis complete
       </div>
 
-      <div className="grid grid-cols-3 gap-3 text-sm">
-        <div className="bg-gray-800/60 rounded-lg px-3 py-2">
-          <div className="text-gray-400 text-xs">Processed</div>
-          <div className="text-white font-semibold">{state.totalProcessed.toLocaleString()}</div>
-        </div>
-        <div className="bg-gray-800/60 rounded-lg px-3 py-2">
-          <div className="text-gray-400 text-xs">Updated</div>
-          <div className="text-white font-semibold">{state.totalUpdated.toLocaleString()}</div>
-        </div>
-        <div className="bg-gray-800/60 rounded-lg px-3 py-2">
-          <div className="text-gray-400 text-xs">Anomalies</div>
-          <div className={`font-semibold ${state.allAnomalies.length > 0 ? 'text-amber-400' : 'text-white'}`}>
-            {state.allAnomalies.length}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+        {[
+          { label: 'Processed', value: state.totalProcessed.toLocaleString() },
+          { label: 'Updated', value: state.totalUpdated.toLocaleString() },
+          { label: 'Anomalies', value: state.allAnomalies.length.toString(), highlight: state.allAnomalies.length > 0 },
+          { label: 'Total cost', value: `$${state.totalCostCAD.toFixed(3)} CAD` },
+        ].map(({ label, value, highlight }) => (
+          <div key={label} className="bg-gray-800/60 rounded-lg px-3 py-2">
+            <div className="text-gray-400 text-xs">{label}</div>
+            <div className={`font-semibold ${highlight ? 'text-amber-400' : 'text-white'}`}>{value}</div>
           </div>
-        </div>
+        ))}
       </div>
 
       {state.allAnomalies.length > 0 && (
         <div className="space-y-2">
           <div className="flex items-center gap-2 text-amber-400 text-sm font-medium">
-            <AlertTriangle size={14} />
-            Flagged transactions
+            <AlertTriangle size={14} /> Flagged transactions
           </div>
           <div className="space-y-2 max-h-56 overflow-y-auto">
             {state.allAnomalies.map((a, i) => (
               <div key={i} className="bg-amber-400/5 border border-amber-400/20 rounded-lg px-3 py-2 text-xs">
-                <div className="flex items-center justify-between mb-0.5">
+                <div className="flex justify-between mb-0.5">
                   <span className="font-medium text-white">{a.payee}</span>
                   <span className={`font-mono ${a.amount >= 0 ? 'text-green-400' : 'text-gray-300'}`}>
                     {formatCAD(a.amount)}
@@ -178,10 +310,6 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
             ))}
           </div>
         </div>
-      )}
-
-      {state.allAnomalies.length === 0 && (
-        <p className="text-xs text-gray-500">No anomalies detected.</p>
       )}
 
       <button
