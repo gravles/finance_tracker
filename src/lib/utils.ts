@@ -49,6 +49,19 @@ export function daysUntil(dateStr: string | null): number | null {
   return Math.ceil(diff / (1000 * 60 * 60 * 24))
 }
 
+/** Convert an amount + frequency to a monthly equivalent */
+export function toMonthlyAmount(amount: number, frequency: string): number {
+  switch (frequency) {
+    case 'weekly':      return amount * 52 / 12
+    case 'biweekly':    return amount * 26 / 12
+    case 'semimonthly': return amount * 2
+    case 'monthly':     return amount
+    case 'quarterly':   return amount / 3
+    case 'annual':      return amount / 12
+    default:            return amount // irregular — use as-is
+  }
+}
+
 /** SHA-256 hash for dedup (browser crypto) */
 export async function sha256(text: string): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))

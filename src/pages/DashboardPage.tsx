@@ -5,6 +5,8 @@ import { formatCAD } from '@/lib/utils'
 import SpendingPieChart from '@/components/charts/SpendingPieChart'
 import MonthlyBarChart from '@/components/charts/MonthlyBarChart'
 import GoalProgressCard from '@/components/GoalProgressCard'
+import SpendingAlerts from '@/components/SpendingAlerts'
+import GoalInsights from '@/components/GoalInsights'
 import type { Goal, SpendingByCategory, MonthlySpend } from '@/types'
 
 export default function DashboardPage() {
@@ -118,6 +120,9 @@ export default function DashboardPage() {
         />
       </div>
 
+      {/* Spending Alerts */}
+      <SpendingAlerts />
+
       {/* Charts row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="card">
@@ -145,6 +150,9 @@ export default function DashboardPage() {
           </div>
         </div>
       )}
+
+      {/* Goal Insights */}
+      <GoalInsights />
     </div>
   )
 }

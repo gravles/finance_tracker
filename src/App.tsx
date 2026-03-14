@@ -8,6 +8,10 @@ import SubscriptionsPage from '@/pages/SubscriptionsPage'
 import GoalsPage from '@/pages/GoalsPage'
 import UploadPage from '@/pages/UploadPage'
 import ChatPage from '@/pages/ChatPage'
+import IncomeSourcesPage from '@/pages/IncomeSourcesPage'
+import BudgetPage from '@/pages/BudgetPage'
+import SpendingPage from '@/pages/SpendingPage'
+import ProjectionsPage from '@/pages/ProjectionsPage'
 
 export default function App() {
   return (
@@ -23,7 +27,11 @@ export default function App() {
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard"      element={<DashboardPage />} />
         <Route path="/transactions"   element={<TransactionsPage />} />
+        <Route path="/spending"       element={<SpendingPage />} />
+        <Route path="/budget"         element={<BudgetPage />} />
         <Route path="/subscriptions"  element={<SubscriptionsPage />} />
+        <Route path="/income"         element={<IncomeSourcesPage />} />
+        <Route path="/projections"    element={<ProjectionsPage />} />
         <Route path="/goals"          element={<GoalsPage />} />
         <Route path="/upload"         element={<UploadPage />} />
         <Route path="/chat"           element={<ChatPage />} />

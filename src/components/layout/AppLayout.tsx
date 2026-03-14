@@ -8,6 +8,10 @@ import {
   MessageSquare,
   TrendingUp,
   LogOut,
+  DollarSign,
+  PieChart,
+  BarChart3,
+  LineChart,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/hooks/useAuth'
@@ -15,7 +19,11 @@ import { useAuth } from '@/hooks/useAuth'
 const NAV = [
   { to: '/dashboard',     icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/transactions',  icon: ArrowLeftRight,  label: 'Transactions' },
+  { to: '/spending',      icon: PieChart,        label: 'Spending' },
+  { to: '/budget',        icon: BarChart3,       label: 'Budget' },
   { to: '/subscriptions', icon: Repeat,          label: 'Subscriptions' },
+  { to: '/income',        icon: DollarSign,      label: 'Income' },
+  { to: '/projections',   icon: LineChart,       label: 'Projections' },
   { to: '/goals',         icon: Target,          label: 'Goals' },
   { to: '/upload',        icon: Upload,          label: 'Import' },
   { to: '/chat',          icon: MessageSquare,   label: 'Ask Claude' },
