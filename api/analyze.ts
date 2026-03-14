@@ -63,6 +63,16 @@ export interface Proposal {
 }
 
 export default async function handler(req: Request): Promise<Response> {
+  try {
+    return await analyze(req)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[analyze] unhandled error:', msg)
+    return json({ error: msg }, 500)
+  }
+}
+
+async function analyze(req: Request): Promise<Response> {
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
 
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY } = process.env
