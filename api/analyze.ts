@@ -1,58 +1,48 @@
 /**
  * POST /api/analyze
  *
- * Claude-powered transaction analysis pipeline.
- * Fetches uncategorized (or all, if force=true) transactions,
- * sends them to Claude in batches, and writes back:
- *   - category_id  (matched to our categories)
- *   - merchant_name (normalized / cleaned up)
- *   - is_recurring  (subscription/bill pattern detected)
- *   - tags          (e.g. ["anomaly", "large-purchase"])
- *   - notes         (Claude's reasoning for anomalies)
+ * Processes ONE batch of transactions per call to stay within
+ * Vercel Edge Function's 25s timeout. The client loops until
+ * hasMore === false.
  *
- * Env vars required:
- *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY
+ * Request:  { force?: bool, batchSize?: number }
+ * Response: { processed, updated, anomalies, hasMore, remaining }
  */
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 
 export const config = { runtime: 'edge' }
 
-const BATCH_SIZE = 75  // transactions per Claude call
-
-interface AnalyzeRequest {
-  force?: boolean   // if true, re-analyze already-categorized transactions too
-  limit?: number    // max transactions to process this run (default 300)
-}
+const DEFAULT_BATCH = 50
 
 interface ClaudeTransaction {
   id: string
   category_id: string | null
   merchant_name: string | null
   is_recurring: boolean
-  anomaly: string | null   // null = normal, string = description
+  anomaly: string | null
   tags: string[]
 }
 
 export default async function handler(req: Request): Promise<Response> {
-  if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 })
+  if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
 
   const supabaseUrl = process.env.SUPABASE_URL
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   const anthropicKey = process.env.ANTHROPIC_API_KEY
 
   if (!supabaseUrl || !supabaseKey || !anthropicKey) {
-    return json({ error: 'Missing env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY' }, 500)
+    return json({ error: 'Missing env vars' }, 500)
   }
 
-  const body: AnalyzeRequest = req.method === 'POST' ? await req.json().catch(() => ({})) : {}
+  const body = await req.json().catch(() => ({})) as { force?: boolean; batchSize?: number }
   const force = body.force ?? false
-  const limit = body.limit ?? 300
+  const batchSize = Math.min(body.batchSize ?? DEFAULT_BATCH, 75)
 
   const supabase = createClient(supabaseUrl, supabaseKey)
   const anthropic = new Anthropic({ apiKey: anthropicKey })
 
-  // ── Fetch categories so Claude can assign exact IDs ────────────────────────
+  // ── Categories ────────────────────────────────────────────────────────────
   const { data: categories } = await supabase
     .from('categories')
     .select('id, name, parent_id')
@@ -63,105 +53,79 @@ export default async function handler(req: Request): Promise<Response> {
     .is('parent_id', null)
 
   const parentMap = new Map((parentCats ?? []).map(c => [c.id, c.name]))
-
   const categoryList = (categories ?? []).map(c => ({
     id: c.id,
     name: c.parent_id ? `${parentMap.get(c.parent_id) ?? ''} > ${c.name}` : c.name,
   }))
 
-  // ── Fetch transactions to analyze ──────────────────────────────────────────
+  // ── Fetch ONE batch ───────────────────────────────────────────────────────
   let query = supabase
     .from('transactions')
-    .select('id, date, payee, amount, memo, category_id')
+    .select('id, date, payee, amount, memo, category_id', { count: 'exact' })
     .eq('is_ignored', false)
     .eq('is_transfer', false)
     .order('date', { ascending: false })
-    .limit(limit)
+    .limit(batchSize)
 
-  if (!force) {
-    query = query.is('category_id', null)
-  }
+  if (!force) query = query.is('category_id', null)
 
-  const { data: transactions, error: txError } = await query
+  const { data: transactions, count: totalRemaining, error } = await query
+  if (error) return json({ error: error.message }, 500)
+  if (!transactions?.length) return json({ processed: 0, updated: 0, anomalies: [], hasMore: false, remaining: 0 })
 
-  if (txError) return json({ error: txError.message }, 500)
-  if (!transactions?.length) return json({ processed: 0, updated: 0, anomalies: [] })
+  // ── Single Claude call ────────────────────────────────────────────────────
+  let claudeResult: ClaudeTransaction[] = []
 
-  // ── Process in batches ─────────────────────────────────────────────────────
-  let totalUpdated = 0
-  const allAnomalies: { payee: string; date: string; amount: number; note: string }[] = []
-
-  for (let i = 0; i < transactions.length; i += BATCH_SIZE) {
-    const batch = transactions.slice(i, i + BATCH_SIZE)
-
-    const prompt = buildPrompt(batch, categoryList)
-
-    let claudeResult: ClaudeTransaction[] = []
-    try {
-      const response = await anthropic.messages.create({
-        model: 'claude-opus-4-6',
-        max_tokens: 4096,
-        messages: [{
-          role: 'user',
-          content: prompt,
-        }],
-        system: `You are a financial data analyst. You categorize transactions, normalize merchant names,
-detect recurring subscriptions/bills, and flag anomalies. Always respond with valid JSON only — no prose.`,
-      })
-
-      const text = response.content[0].type === 'text' ? response.content[0].text : ''
-      // Extract JSON array from response (Claude sometimes wraps in markdown)
-      const jsonMatch = text.match(/\[[\s\S]*\]/)
-      if (jsonMatch) {
-        claudeResult = JSON.parse(jsonMatch[0]) as ClaudeTransaction[]
-      }
-    } catch (e) {
-      console.error('Claude batch error:', e)
-      continue
-    }
-
-    // ── Write results back to Supabase ─────────────────────────────────────
-    const updates = claudeResult
-      .filter(r => r.id)
-      .map(r => ({
-        id: r.id,
-        category_id: r.category_id,
-        merchant_name: r.merchant_name,
-        is_recurring: r.is_recurring ?? false,
-        tags: r.tags ?? [],
-        notes: r.anomaly ?? null,
-      }))
-
-    if (updates.length) {
-      const { count } = await supabase
-        .from('transactions')
-        .upsert(updates, { onConflict: 'id' })
-        .select('id', { count: 'exact', head: true })
-
-      totalUpdated += count ?? 0
-    }
-
-    // Collect anomalies for the response summary
-    for (const r of claudeResult) {
-      if (r.anomaly) {
-        const tx = batch.find(t => t.id === r.id)
-        if (tx) {
-          allAnomalies.push({
-            payee: tx.payee,
-            date: tx.date,
-            amount: tx.amount,
-            note: r.anomaly,
-          })
-        }
-      }
-    }
-  }
-
-  return json({
-    processed: transactions.length,
-    updated: totalUpdated,
-    anomalies: allAnomalies,
+  const response = await anthropic.messages.create({
+    model: 'claude-opus-4-6',
+    max_tokens: 4096,
+    system: `You are a financial data analyst for a user in Ottawa, Canada.
+Categorize transactions, normalize merchant names, detect recurring charges, flag anomalies.
+Respond with valid JSON array only — no prose, no markdown fences.`,
+    messages: [{
+      role: 'user',
+      content: buildPrompt(transactions, categoryList),
+    }],
   })
+
+  const text = response.content[0].type === 'text' ? response.content[0].text : ''
+  const jsonMatch = text.match(/\[[\s\S]*\]/)
+  if (jsonMatch) {
+    try { claudeResult = JSON.parse(jsonMatch[0]) } catch { /* ignore parse error */ }
+  }
+
+  // ── Write back ────────────────────────────────────────────────────────────
+  const updates = claudeResult
+    .filter(r => r.id)
+    .map(r => ({
+      id: r.id,
+      category_id: r.category_id ?? null,
+      merchant_name: r.merchant_name ?? null,
+      is_recurring: r.is_recurring ?? false,
+      tags: r.tags ?? [],
+      notes: r.anomaly ?? null,
+    }))
+
+  let updated = 0
+  if (updates.length) {
+    const { count } = await supabase
+      .from('transactions')
+      .upsert(updates, { onConflict: 'id' })
+      .select('id', { count: 'exact', head: true })
+    updated = count ?? 0
+  }
+
+  const anomalies = claudeResult
+    .filter(r => r.anomaly)
+    .map(r => {
+      const tx = transactions.find(t => t.id === r.id)
+      return { payee: tx?.payee ?? '', date: tx?.date ?? '', amount: tx?.amount ?? 0, note: r.anomaly! }
+    })
+
+  // remaining = total matching - what we just processed
+  const remaining = Math.max(0, (totalRemaining ?? 0) - transactions.length)
+
+  return json({ processed: transactions.length, updated, anomalies, hasMore: remaining > 0, remaining })
 }
 
 function buildPrompt(
@@ -173,42 +137,25 @@ function buildPrompt(
 ## Available Categories
 ${JSON.stringify(categories, null, 2)}
 
-## Transactions to Analyze
-${JSON.stringify(transactions.map(t => ({
-  id: t.id,
-  date: t.date,
-  payee: t.payee,
-  amount: t.amount,
-  memo: t.memo,
-})), null, 2)}
+## Transactions
+${JSON.stringify(transactions.map(t => ({ id: t.id, date: t.date, payee: t.payee, amount: t.amount, memo: t.memo })), null, 2)}
 
 ## Instructions
+Return a JSON array, one object per transaction:
+- id: unchanged UUID
+- category_id: best matching UUID from categories (null only if truly unclassifiable)
+- merchant_name: clean human-readable name. Strip store numbers, locations, card codes.
+  "AMZN MKTP CA*1234" → "Amazon", "TIM HORTONS #492 OTTAWA ON" → "Tim Hortons",
+  "NETFLIX.COM" → "Netflix", "ENERCARE HOME SERV" → "Enercare"
+- is_recurring: true for subscriptions, bills, insurance, utilities, gym memberships
+- anomaly: null normally. Short string for: charges >$1000 (non-rent/mortgage),
+  suspected duplicates, unrecognized foreign merchants, anything suspicious
+- tags: array from ["recurring","anomaly","large-purchase","travel","tax-deductible","rental-expense","business"]
 
-For each transaction return a JSON array with one object per transaction containing:
+User context: ~$184k salary + $24k rental income. Negative = expense, positive = income/refund.
+Common merchants: Loblaws, Metro, FreshCo, Canadian Tire, LCBO, WestJet, Air Canada, Uber Eats.
 
-- **id**: the transaction UUID (unchanged)
-- **category_id**: the UUID from the categories list that best fits. Use null only if truly unclassifiable.
-- **merchant_name**: cleaned-up merchant name. Strip codes/locations/card suffixes.
-  Examples: "AMZN MKTP CA*1234 SEATTLE" → "Amazon", "TIM HORTONS #1234 OTTAWA ON" → "Tim Hortons",
-  "NETFLIX.COM" → "Netflix", "UBER* TRIP" → "Uber"
-- **is_recurring**: true if this looks like a subscription, bill, or regular charge
-  (e.g. streaming, insurance, phone bill, gym membership, utilities)
-- **anomaly**: null for normal transactions. A short string description for:
-  - Unusually large amounts (>$1000 for a single merchant that isn't rent/mortgage/insurance)
-  - Potential duplicate charges (same payee, very close dates)
-  - Suspicious or unrecognized merchants
-  - Charges at odd hours or in unexpected currencies
-- **tags**: array of relevant tags from: ["recurring", "anomaly", "large-purchase",
-  "travel", "tax-deductible", "rental-expense", "business"]
-
-Context about this user:
-- Based in Ottawa, Ontario, Canada
-- Income: ~$184k salary + ~$24k rental income
-- Common merchants: Canadian grocery stores (Loblaws, Metro, FreshCo),
-  coffee shops, Ottawa-area restaurants, WestJet/Air Canada for travel
-- Negative amounts = expenses, positive = income/refunds
-
-Return ONLY a valid JSON array. No markdown, no explanation.`
+Return ONLY the JSON array.`
 }
 
 function json(data: unknown, status = 200): Response {
