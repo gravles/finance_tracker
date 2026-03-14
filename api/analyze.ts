@@ -138,20 +138,30 @@ export default async function handler(req: Request): Promise<Response> {
     try { claudeResults = JSON.parse(match[0]) } catch { /* ignore */ }
   }
 
-  // ── Build proposals (dry run returns these for review) ────────────────────
+  const validCategoryIds = new Set(categoryList.map(c => c.id))
+
+  // ── Build proposals ───────────────────────────────────────────────────────
   const proposals: Proposal[] = claudeResults
     .filter(r => r.id)
     .map(r => {
       const tx = txList.find(t => t.id === r.id)
+
+      // Only accept category_id if it exactly matches one of our UUIDs
+      const resolvedCategoryId = r.category_id && validCategoryIds.has(r.category_id)
+        ? r.category_id
+        : tx?.category_id ?? null   // fall back to existing — never blank a good category
+
+      const resolvedMerchant = r.merchant_name?.trim() || tx?.merchant_name || tx?.payee || ''
+
       return {
         id: r.id,
         date: tx?.date ?? '',
         payee: tx?.payee ?? '',
         amount: tx?.amount ?? 0,
         current_category: tx?.category_id ? catNameById.get(tx.category_id) ?? null : null,
-        proposed_category: r.category_id ? catNameById.get(r.category_id) ?? null : null,
-        proposed_category_id: r.category_id,
-        merchant_name: r.merchant_name,
+        proposed_category: resolvedCategoryId ? catNameById.get(resolvedCategoryId) ?? null : null,
+        proposed_category_id: resolvedCategoryId,
+        merchant_name: resolvedMerchant,
         is_recurring: r.is_recurring ?? false,
         anomaly: r.anomaly ?? null,
         confidence: r.confidence ?? 'medium',
@@ -165,7 +175,7 @@ export default async function handler(req: Request): Promise<Response> {
   if (!dryRun) {
     const updates = proposals.map(p => ({
       id: p.id,
-      category_id: p.proposed_category_id,
+      category_id: p.proposed_category_id,     // already validated above
       merchant_name: p.merchant_name || null,
       is_recurring: p.is_recurring,
       tags: [],
@@ -206,13 +216,13 @@ function buildPrompt(
   transactions: TxRow[],
   categories: { id: string; name: string }[],
 ): string {
-  // Compact category list to save tokens — use short IDs
-  const catList = categories.map(c => `${c.id.slice(0, 8)} ${c.name}`).join('\n')
+  // Full UUIDs required so Claude can return exact matches
+  const catList = categories.map(c => `${c.id} | ${c.name}`).join('\n')
 
   const txData = transactions.map(t => ({
     id: t.id,
     date: t.date,
-    p: t.payee,      // short key = fewer tokens
+    p: t.payee,
     amt: t.amount,
     memo: t.memo || undefined,
   }))
