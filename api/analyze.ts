@@ -249,7 +249,22 @@ Merchant normalization examples:
 Common Ottawa merchants: Loblaws, Metro, FreshCo, Farm Boy, LCBO, Beer Store,
 Canadian Tire, Sport Chek, Dollarama, Rideau Centre, Bayshore Shopping Centre.
 
-Negative amount = expense. Positive = income or refund.
+USER-SPECIFIC FACTS (apply these every time):
+- "Align" = physiotherapy clinic → Health & Fitness (NOT dining)
+- "Manulife" / "EFT Manulife" = medical insurance reimbursement → Health & Fitness, positive = refund
+- "PSHCP" / "EFT PSHCP RSSFP" = Public Service Health Care Plan reimbursement → Health & Fitness
+- "Payroll Deposit Gartner Canada" = primary employer salary (Gartner, IT consulting)
+- "Payroll Deposit Canada" = could be government pay or second Gartner deposit — tag as Employment Income
+- If a Gartner deposit is unusually large (>$5,000 net) it is likely an annual bonus — add tag "bonus"
+- "Paypal *bambulab" = Bambu Lab (3D printer company) → Shopping, NOT Fitness
+- "Bell Media" = media/entertainment company → Entertainment or Subscriptions, NOT food
+- "Zwift" = indoor cycling training app → Fitness, is_recurring=true
+- "Fizz" = Quebec mobile carrier → Utilities (phone), is_recurring=true
+- "Fubotv" / "FuboTV" = live TV streaming → Subscriptions (streaming), is_recurring=true
+- "Interac E-transfer" = peer-to-peer transfer → Transfers
+- Transfer rows (payee = "Transfer Out", "Transfer In") = internal account moves, not expenses
+
+Negative amount = expense. Positive = income, refund, or reimbursement.
 Return ONLY the JSON array.`
 }
 

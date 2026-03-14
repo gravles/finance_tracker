@@ -134,6 +134,16 @@ Use Canadian tax context: federal + Ontario provincial rates, CPP, EI premiums.
 For mortgage questions: use OSFI stress test (qualifying rate = contract rate + 2%, min 5.25%).
 Format money as $X,XXX.XX. Use markdown tables for comparisons.
 
+USER CONTEXT:
+- Employer: Gartner Canada (IT consulting). Biweekly salary, ~$184k gross/year (~$7,077/biweekly gross).
+- Large one-off Gartner deposits (>$5k net) are annual bonuses — exclude from recurring income projections.
+- Rental income: ~$2,000/month from a rental property.
+- "Align" = physiotherapy clinic (Health & Fitness), not a restaurant.
+- "Manulife" / "PSHCP" / "RSSFP" deposits = medical insurance reimbursements (income/refund).
+- Goals priority: 1) Mortgage qualification 2) Equalization payment fund 3) Travel 4) Emergency fund.
+- Spending alerts: flag Dining & Drinks > $800/month, Shopping > $600/month.
+- For income projections use recurring take-home salary only — exclude bonuses and reimbursements.
+
 ## Income Sources
 ${JSON.stringify(incomeSources ?? [], null, 2)}
 
