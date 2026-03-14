@@ -227,6 +227,13 @@ export function normalizeDate(raw: string): string {
   if (!raw) return ''
   const s = raw.trim()
 
+  // Mon DD, YYYY  — "Mar 14, 2026"
+  const mdyLong = s.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/)
+  if (mdyLong) {
+    const month = MONTH_MAP[mdyLong[1].toLowerCase()]
+    if (month) return `${mdyLong[3]}-${month}-${mdyLong[2].padStart(2, '0')}`
+  }
+
   // DD Mon(th) YYYY  — "30 Sept 2025", "13 Mar 2026", "1 January 2026"
   const dmyLong = s.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/)
   if (dmyLong) {
