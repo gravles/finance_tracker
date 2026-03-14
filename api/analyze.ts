@@ -18,10 +18,10 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 
-export const config = { runtime: 'edge' }
+export const maxDuration = 60  // Node.js serverless — Vercel Hobby supports up to 60s
 
 const HAIKU  = 'claude-haiku-4-5-20251001'
-const BATCH  = 30  // conservative — leaves ~10s margin within 25s Edge limit
+const BATCH  = 40  // safe with 60s timeout
 
 // Rough token cost estimates (USD, converted to CAD ~1.38)
 const HAIKU_IN_PER_1M  = 0.80
