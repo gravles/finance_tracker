@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
-import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { formatCAD } from '@/lib/utils'
 import CategoryTrendChart from '@/components/charts/CategoryTrendChart'
@@ -29,6 +30,7 @@ function formatMonthLabel(year: number, month: number) {
 }
 
 export default function SpendingPage() {
+  const navigate = useNavigate()
   const now = new Date()
   const [year, setYear] = useState(now.getFullYear())
   const [month, setMonth] = useState(now.getMonth() + 1)
@@ -286,7 +288,17 @@ export default function SpendingPage() {
                           isExpanded ? <ChevronUp size={14} className="text-gray-500" /> : <ChevronDown size={14} className="text-gray-500" />
                         ) : <div className="w-3.5" />}
                         {cat.color && <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: cat.color }} />}
-                        <span className="font-medium text-white">{cat.name}</span>
+                        <button
+                          className="font-medium text-white hover:text-indigo-300 transition-colors text-left flex items-center gap-1 group/link"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            navigate(`/transactions?category=${cat.id}&from=${start}&to=${end}`)
+                          }}
+                          title="View transactions"
+                        >
+                          {cat.name}
+                          <ExternalLink size={11} className="opacity-0 group-hover/link:opacity-60 transition-opacity" />
+                        </button>
                       </div>
                       <div className="w-28 text-right px-4 py-3 font-mono text-white">{formatCAD(cat.total)}</div>
                       <div className="w-20 text-right px-4 py-3 text-gray-400">{pctOfTotal.toFixed(1)}%</div>
@@ -308,7 +320,13 @@ export default function SpendingPage() {
                       <div key={child.id} className="flex items-center bg-gray-800/20 border-t border-gray-800/30">
                         <div className="flex items-center gap-2 px-4 py-2.5 pl-12 flex-1">
                           {child.color && <div className="w-2 h-2 rounded-full" style={{ backgroundColor: child.color }} />}
-                          <span className="text-gray-300 text-xs">{child.name}</span>
+                          <button
+                            className="text-gray-300 text-xs hover:text-indigo-300 transition-colors text-left"
+                            onClick={() => navigate(`/transactions?category=${child.id}&from=${start}&to=${end}`)}
+                            title="View transactions"
+                          >
+                            {child.name}
+                          </button>
                         </div>
                         <div className="w-28 text-right px-4 py-2.5 font-mono text-gray-300 text-xs">{formatCAD(child.total)}</div>
                         <div className="w-20 text-right px-4 py-2.5 text-gray-500 text-xs">

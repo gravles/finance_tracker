@@ -173,17 +173,21 @@ export default function IncomeSourcesPage() {
               </select>
             </div>
             <div>
-              <label className="text-xs text-gray-400 block mb-1">Gross Amount (CAD)</label>
+              <label className="text-xs text-gray-400 block mb-1">
+                Gross per {form.frequency === 'annual' ? 'year' : form.frequency === 'monthly' ? 'month' : 'pay period'} (CAD)
+              </label>
               <input
                 type="number"
                 value={form.gross_cad}
                 onChange={e => setForm({ ...form, gross_cad: e.target.value })}
-                placeholder="Amount per pay period"
+                placeholder={form.frequency === 'biweekly' ? 'e.g. 7000 (per paycheque)' : 'Amount per period'}
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
             </div>
             <div>
-              <label className="text-xs text-gray-400 block mb-1">Net Amount (CAD)</label>
+              <label className="text-xs text-gray-400 block mb-1">
+                Net per {form.frequency === 'annual' ? 'year' : form.frequency === 'monthly' ? 'month' : 'pay period'} (CAD)
+              </label>
               <input
                 type="number"
                 value={form.net_cad}
@@ -204,6 +208,28 @@ export default function IncomeSourcesPage() {
                 ))}
               </select>
             </div>
+            {/* Live calculation preview */}
+            {(() => {
+              const gross = parseFloat(form.gross_cad)
+              const net = parseFloat(form.net_cad)
+              if (isNaN(gross) || gross <= 0) return null
+              const grossMonthly = toMonthlyAmount(gross, form.frequency)
+              const grossAnnual = grossMonthly * 12
+              const netMonthly = !isNaN(net) && net > 0 ? toMonthlyAmount(net, form.frequency) : null
+              const netAnnual = netMonthly != null ? netMonthly * 12 : null
+              const looksWrong = grossAnnual > 500000 || grossMonthly < 100
+              return (
+                <div className={`col-span-2 text-xs rounded-lg px-3 py-2 ${looksWrong ? 'bg-amber-400/10 border border-amber-400/30 text-amber-300' : 'bg-gray-800/60 text-gray-400'}`}>
+                  {looksWrong && <span className="font-medium text-amber-400 mr-1">Check values:</span>}
+                  Gross = {formatCAD(grossMonthly)}/mo · {formatCAD(grossAnnual)}/yr
+                  {netMonthly != null && netAnnual != null && (
+                    <span className="ml-3 text-green-400">
+                      Net = {formatCAD(netMonthly)}/mo · {formatCAD(netAnnual)}/yr
+                    </span>
+                  )}
+                </div>
+              )
+            })()}
             <div className="col-span-2">
               <label className="text-xs text-gray-400 block mb-1">Notes</label>
               <input
