@@ -14,6 +14,8 @@ import SpendingPage from '@/pages/SpendingPage'
 import ProjectionsPage from '@/pages/ProjectionsPage'
 import RulesPage from '@/pages/RulesPage'
 import RecurringExpensesPage from '@/pages/RecurringExpensesPage'
+import AccountsPage from '@/pages/AccountsPage'
+import CategoriesPage from '@/pages/CategoriesPage'
 
 export default function App() {
   return (
@@ -37,6 +39,8 @@ export default function App() {
         <Route path="/rules"          element={<RulesPage />} />
         <Route path="/projections"    element={<ProjectionsPage />} />
         <Route path="/goals"          element={<GoalsPage />} />
+        <Route path="/accounts"       element={<AccountsPage />} />
+        <Route path="/categories"     element={<CategoriesPage />} />
         <Route path="/upload"         element={<UploadPage />} />
         <Route path="/chat"           element={<ChatPage />} />
       </Route>

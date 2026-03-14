@@ -14,23 +14,44 @@ import {
   LineChart,
   Wand2,
   CalendarClock,
+  Landmark,
+  Tags,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/hooks/useAuth'
 
-const NAV = [
-  { to: '/dashboard',     icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/transactions',  icon: ArrowLeftRight,  label: 'Transactions' },
-  { to: '/spending',      icon: PieChart,        label: 'Spending' },
-  { to: '/budget',        icon: BarChart3,       label: 'Budget' },
-  { to: '/subscriptions', icon: Repeat,          label: 'Subscriptions' },
-  { to: '/income',        icon: DollarSign,      label: 'Income' },
-  { to: '/recurring',     icon: CalendarClock,   label: 'Fixed Bills' },
-  { to: '/rules',         icon: Wand2,           label: 'Rules' },
-  { to: '/projections',   icon: LineChart,       label: 'Projections' },
-  { to: '/goals',         icon: Target,          label: 'Goals' },
-  { to: '/upload',        icon: Upload,          label: 'Import' },
-  { to: '/chat',          icon: MessageSquare,   label: 'Ask Claude' },
+interface NavItem { to: string; icon: typeof LayoutDashboard; label: string }
+interface NavSection { title?: string; items: NavItem[] }
+
+const NAV_SECTIONS: NavSection[] = [
+  {
+    items: [
+      { to: '/dashboard',     icon: LayoutDashboard, label: 'Dashboard' },
+      { to: '/transactions',  icon: ArrowLeftRight,  label: 'Transactions' },
+      { to: '/spending',      icon: PieChart,        label: 'Spending' },
+      { to: '/budget',        icon: BarChart3,       label: 'Budget' },
+    ],
+  },
+  {
+    title: 'Planning',
+    items: [
+      { to: '/income',        icon: DollarSign,      label: 'Income' },
+      { to: '/subscriptions', icon: Repeat,          label: 'Subscriptions' },
+      { to: '/recurring',     icon: CalendarClock,   label: 'Fixed Bills' },
+      { to: '/projections',   icon: LineChart,       label: 'Projections' },
+      { to: '/goals',         icon: Target,          label: 'Goals' },
+    ],
+  },
+  {
+    title: 'Setup',
+    items: [
+      { to: '/accounts',      icon: Landmark,        label: 'Accounts' },
+      { to: '/categories',    icon: Tags,            label: 'Categories' },
+      { to: '/rules',         icon: Wand2,           label: 'Rules' },
+      { to: '/upload',        icon: Upload,          label: 'Import' },
+      { to: '/chat',          icon: MessageSquare,   label: 'Ask Claude' },
+    ],
+  },
 ]
 
 export default function AppLayout() {
@@ -47,18 +68,29 @@ export default function AppLayout() {
         </div>
 
         {/* Nav */}
-        <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-          {NAV.map(({ to, icon: Icon, label }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                cn('nav-link', isActive && 'nav-link-active')
-              }
-            >
-              <Icon size={17} />
-              {label}
-            </NavLink>
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+          {NAV_SECTIONS.map((section, si) => (
+            <div key={si}>
+              {section.title && (
+                <div className="text-[10px] font-medium text-gray-600 uppercase tracking-wider px-3 pt-4 pb-1">
+                  {section.title}
+                </div>
+              )}
+              <div className="space-y-0.5">
+                {section.items.map(({ to, icon: Icon, label }) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    className={({ isActive }) =>
+                      cn('nav-link', isActive && 'nav-link-active')
+                    }
+                  >
+                    <Icon size={17} />
+                    {label}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 

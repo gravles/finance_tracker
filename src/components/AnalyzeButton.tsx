@@ -224,7 +224,7 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
             onClick={runFull}
             className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
           >
-            <Zap size={14} /> Looks good — analyze all ~6,000
+            <Zap size={14} /> Looks good — analyze all
           </button>
           <button
             onClick={() => setStage({ status: 'idle' })}
@@ -234,7 +234,7 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
           </button>
         </div>
         <p className="text-xs text-gray-600">
-          Full run estimated: ~$1.20–1.50 CAD for 6,000 transactions (Haiku model)
+          Full run estimated: ~$0.20 CAD per 1,000 transactions (Haiku model)
         </p>
       </div>
     )

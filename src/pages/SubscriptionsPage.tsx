@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Check, X, AlertCircle, RefreshCw, Search, Plus } from 'lucide-react'
+import { Check, X, AlertCircle, RefreshCw, Search, Plus, Pencil, Trash2 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, formatDate } from '@/lib/utils'
-import type { Subscription, KeepFlag, SubFrequency } from '@/types'
+import type { Subscription, KeepFlag, SubFrequency, Category } from '@/types'
+
+const SUB_FREQUENCIES: SubFrequency[] = ['weekly', 'biweekly', 'monthly', 'quarterly', 'annual']
 
 interface DetectedSub {
   merchant_name: string
@@ -20,13 +22,30 @@ const FLAG_CONFIG: Record<KeepFlag, { label: string; icon: typeof Check; class: 
   review: { label: 'Review', icon: AlertCircle,  class: 'text-amber-400 bg-amber-400/10' },
 }
 
+const emptySubForm = {
+  merchant_name: '',
+  amount: '',
+  frequency: 'monthly' as SubFrequency,
+  category_id: '',
+  notes: '',
+}
+
 export default function SubscriptionsPage() {
   const [subs, setSubs] = useState<Subscription[]>([])
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
   const [detected, setDetected] = useState<DetectedSub[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
+  const [showAdd, setShowAdd] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [subForm, setSubForm] = useState(emptySubForm)
 
-  useEffect(() => { loadSubs() }, [])
+  useEffect(() => { loadSubs(); loadCategories() }, [])
+
+  function loadCategories() {
+    supabase.from('categories').select('id, name, parent_id').order('name')
+      .then(({ data }) => setCategories((data ?? []) as Category[]))
+  }
 
   function loadSubs() {
     supabase
@@ -38,6 +57,61 @@ export default function SubscriptionsPage() {
         setSubs((data ?? []) as unknown as Subscription[])
         setLoading(false)
       })
+  }
+
+  // Build category options
+  const parentMap = new Map(categories.filter(c => !c.parent_id).map(c => [c.id, c.name]))
+  const categoryOptions = categories.map(c => ({
+    id: c.id,
+    label: c.parent_id ? `${parentMap.get(c.parent_id) ?? ''} > ${c.name}` : c.name,
+  })).sort((a, b) => a.label.localeCompare(b.label))
+
+  async function handleSaveSub() {
+    const amount = parseFloat(subForm.amount)
+    if (!subForm.merchant_name.trim() || isNaN(amount) || amount <= 0) return
+
+    const record = {
+      merchant_name: subForm.merchant_name.trim(),
+      amount,
+      frequency: subForm.frequency,
+      category_id: subForm.category_id || null,
+      notes: subForm.notes.trim() || null,
+      is_active: true,
+    }
+
+    if (editingId) {
+      await supabase.from('subscriptions').update(record).eq('id', editingId)
+    } else {
+      await supabase.from('subscriptions').insert(record)
+    }
+
+    setEditingId(null)
+    setShowAdd(false)
+    setSubForm(emptySubForm)
+    loadSubs()
+  }
+
+  function startEditSub(s: Subscription) {
+    setEditingId(s.id)
+    setShowAdd(true)
+    setSubForm({
+      merchant_name: s.merchant_name,
+      amount: String(s.amount),
+      frequency: s.frequency,
+      category_id: s.category_id ?? '',
+      notes: s.notes ?? '',
+    })
+  }
+
+  async function handleDeleteSub(id: string) {
+    await supabase.from('subscriptions').delete().eq('id', id)
+    loadSubs()
+  }
+
+  function cancelSubEdit() {
+    setEditingId(null)
+    setShowAdd(false)
+    setSubForm(emptySubForm)
   }
 
   async function scanTransactions() {
@@ -94,9 +168,20 @@ export default function SubscriptionsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold text-white">Subscriptions</h1>
-        <p className="text-sm text-gray-400 mt-1">Audit your recurring charges</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">Subscriptions</h1>
+          <p className="text-sm text-gray-400 mt-1">Audit your recurring charges</p>
+        </div>
+        {!showAdd && (
+          <button
+            onClick={() => { setShowAdd(true); setSubForm(emptySubForm); setEditingId(null) }}
+            className="flex items-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            <Plus size={16} />
+            Add Subscription
+          </button>
+        )}
       </div>
 
       {/* Summary */}
@@ -116,6 +201,88 @@ export default function SubscriptionsPage() {
           <div className="text-xs text-gray-500 mt-1">{toCancel.length} marked to cancel</div>
         </div>
       </div>
+
+      {/* Add/Edit Form */}
+      {showAdd && (
+        <div className="card space-y-4">
+          <h3 className="text-sm font-medium text-white">
+            {editingId ? 'Edit Subscription' : 'New Subscription'}
+          </h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Merchant Name</label>
+              <input
+                type="text"
+                value={subForm.merchant_name}
+                onChange={e => setSubForm({ ...subForm, merchant_name: e.target.value })}
+                placeholder="e.g. Netflix, Spotify"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Amount (CAD)</label>
+              <input
+                type="number"
+                value={subForm.amount}
+                onChange={e => setSubForm({ ...subForm, amount: e.target.value })}
+                placeholder="Monthly cost"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Frequency</label>
+              <select
+                value={subForm.frequency}
+                onChange={e => setSubForm({ ...subForm, frequency: e.target.value as SubFrequency })}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                {SUB_FREQUENCIES.map(f => (
+                  <option key={f} value={f}>{f.charAt(0).toUpperCase() + f.slice(1)}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Category</label>
+              <select
+                value={subForm.category_id}
+                onChange={e => setSubForm({ ...subForm, category_id: e.target.value })}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                <option value="">None</option>
+                {categoryOptions.map(c => (
+                  <option key={c.id} value={c.id}>{c.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="col-span-2">
+              <label className="text-xs text-gray-400 block mb-1">Notes</label>
+              <input
+                type="text"
+                value={subForm.notes}
+                onChange={e => setSubForm({ ...subForm, notes: e.target.value })}
+                placeholder="Optional notes"
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={handleSaveSub}
+              className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded-lg transition-colors"
+            >
+              <Check size={14} />
+              {editingId ? 'Update' : 'Save'}
+            </button>
+            <button
+              onClick={cancelSubEdit}
+              className="flex items-center gap-1.5 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded-lg transition-colors"
+            >
+              <X size={14} />
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Scan Button */}
       <div className="flex items-center gap-3">
@@ -202,7 +369,7 @@ export default function SubscriptionsPage() {
                       {formatCAD(s.amount)}
                     </td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center justify-center gap-1.5">
+                      <div className="flex items-center justify-center gap-1">
                         {(['keep', 'review', 'cancel'] as KeepFlag[]).map(f => {
                           const cfg = FLAG_CONFIG[f]
                           const Icon = cfg.icon
@@ -220,6 +387,21 @@ export default function SubscriptionsPage() {
                             </button>
                           )
                         })}
+                        <span className="w-px h-4 bg-gray-800 mx-0.5" />
+                        <button
+                          onClick={() => startEditSub(s)}
+                          className="p-1.5 rounded text-gray-600 hover:text-gray-400 hover:bg-gray-800 transition-colors"
+                          title="Edit"
+                        >
+                          <Pencil size={13} />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteSub(s.id)}
+                          className="p-1.5 rounded text-gray-600 hover:text-red-400 hover:bg-gray-800 transition-colors"
+                          title="Delete"
+                        >
+                          <Trash2 size={13} />
+                        </button>
                       </div>
                     </td>
                   </tr>

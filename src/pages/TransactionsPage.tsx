@@ -46,7 +46,13 @@ export default function TransactionsPage() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [showFilters, setShowFilters] = useState(false)
+  const [showFilters, setShowFilters] = useState(() => {
+    // Auto-show filters if arriving with filter params in URL
+    return !!(searchParams.get('category') || searchParams.get('account') ||
+      searchParams.get('from') || searchParams.get('to') ||
+      searchParams.get('amountMin') || searchParams.get('amountMax') ||
+      searchParams.get('type') || searchParams.get('recurring'))
+  })
   const [categories, setCategories] = useState<Category[]>([])
   const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([])
 
