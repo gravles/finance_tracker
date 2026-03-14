@@ -3,6 +3,7 @@ import { Search, ChevronLeft, ChevronRight } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, formatDate } from '@/lib/utils'
 import type { Transaction } from '@/types'
+import AnalyzeButton from '@/components/AnalyzeButton'
 
 const PAGE_SIZE = 50
 
@@ -41,11 +42,16 @@ export default function TransactionsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-semibold text-white">Transactions</h1>
           <p className="text-sm text-gray-400 mt-1">{total.toLocaleString()} total</p>
         </div>
+        <AnalyzeButton
+          force
+          label="Re-analyze all"
+          onComplete={() => fetchTransactions()}
+        />
       </div>
 
       {/* Search */}

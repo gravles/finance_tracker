@@ -3,6 +3,7 @@ import { Upload, CheckCircle2, XCircle, FileText, AlertTriangle, ChevronRight } 
 import { supabase } from '@/lib/supabase'
 import { preflightCsv, importSimplifiCsv } from '@/lib/csv'
 import type { CsvPreflight } from '@/lib/csv'
+import AnalyzeButton from '@/components/AnalyzeButton'
 
 type Stage =
   | { status: 'idle' }
@@ -160,6 +161,14 @@ export default function UploadPage() {
               </ul>
             </details>
           )}
+          {/* Analyze with Claude right after import */}
+          <div className="border-t border-gray-800 pt-4">
+            <p className="text-xs text-gray-500 mb-3">
+              Let Claude categorize transactions, clean up merchant names, and flag anything unusual.
+            </p>
+            <AnalyzeButton label="Analyze imported transactions" />
+          </div>
+
           <button onClick={reset} className="flex items-center gap-1.5 text-sm text-indigo-400 hover:text-indigo-300">
             <FileText size={14} /> Import another file
           </button>
