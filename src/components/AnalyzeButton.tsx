@@ -52,9 +52,8 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dryRun: true, force, batchSize: 20 }),
       })
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-      const data = await res.json() as BatchResponse
-      if (data.error) throw new Error(data.error)
+      const data = await res.json().catch(() => ({})) as BatchResponse
+      if (!res.ok || data.error) throw new Error(data.error ?? `${res.status} ${res.statusText}`)
       setStage({ status: 'dry-done', proposals: data.proposals, costCAD: data.estimatedCostCAD })
     } catch (e) {
       setStage({ status: 'error', message: e instanceof Error ? e.message : String(e) })
@@ -74,9 +73,8 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ dryRun: false, force, batchSize: 50 }),
         })
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-        const data = await res.json() as BatchResponse
-        if (data.error) throw new Error(data.error)
+        const data = await res.json().catch(() => ({})) as BatchResponse
+        if (!res.ok || data.error) throw new Error(data.error ?? `${res.status} ${res.statusText}`)
 
         state.totalProcessed += data.processed
         state.totalUpdated   += data.updated

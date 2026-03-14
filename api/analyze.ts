@@ -2,12 +2,11 @@
  * POST /api/analyze
  *
  * Claude-powered transaction analysis.
- * One batch per request (50 tx) to stay under Edge 25s timeout.
+ * One batch per request to stay within the 60s Node.js serverless limit.
  * Client loops until hasMore === false.
  *
  * Models:
  *   Haiku  — bulk categorization (~$0.01/batch, ~$1.20 for 6k tx)
- *   Opus   — anomaly explanations only (invoked rarely)
  *
  * Request:
  *   { dryRun?: bool, force?: bool, batchSize?: number }
@@ -15,13 +14,14 @@
  * Response:
  *   { processed, updated, proposals?, anomalies, hasMore, remaining, estimatedCostCAD }
  */
+import type { IncomingMessage, ServerResponse } from 'http'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 
-export const config = { runtime: 'edge' }
+export const maxDuration = 60  // Node.js serverless — Vercel Hobby supports up to 60s
 
 const HAIKU  = 'claude-haiku-4-5-20251001'
-const BATCH  = 30  // conservative — leaves ~10s margin within 25s Edge limit
+const BATCH  = 40
 
 // Rough token cost estimates (USD, converted to CAD ~1.38)
 const HAIKU_IN_PER_1M  = 0.80
@@ -62,15 +62,46 @@ export interface Proposal {
   confidence: 'high' | 'medium' | 'low'
 }
 
-export default async function handler(req: Request): Promise<Response> {
-  if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
+// Vercel adds .json()/.status()/.send() to ServerResponse at runtime
+type VercelRes = ServerResponse & {
+  status: (code: number) => VercelRes
+  json: (data: unknown) => void
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = ''
+    req.on('data', (chunk: Buffer) => { data += chunk.toString() })
+    req.on('end', () => resolve(data))
+    req.on('error', reject)
+  })
+}
+
+export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const vres = res as VercelRes
+  try {
+    await analyze(req, vres)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[analyze] unhandled error:', msg)
+    vres.status(500).json({ error: msg })
+  }
+}
+
+async function analyze(req: IncomingMessage, res: VercelRes): Promise<void> {
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method not allowed' })
+    return
+  }
 
   const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY } = process.env
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !ANTHROPIC_API_KEY) {
-    return json({ error: 'Missing env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY' }, 500)
+    res.status(500).json({ error: 'Missing env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, ANTHROPIC_API_KEY' })
+    return
   }
 
-  const body = await req.json().catch(() => ({})) as {
+  const rawBody = await readBody(req)
+  const body = JSON.parse(rawBody || '{}') as {
     dryRun?: boolean
     force?: boolean
     batchSize?: number
@@ -84,8 +115,6 @@ export default async function handler(req: Request): Promise<Response> {
   const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
 
   // ── Categories + transactions in parallel ─────────────────────────────────
-  // Single categories query with self-join avoidance — fetch all, build map in JS
-  // No count: 'exact' on transactions — scanning 6k rows for a count adds ~2s per call
   let txQuery = supabase
     .from('transactions')
     .select('id, date, payee, amount, memo, category_id, merchant_name')
@@ -104,10 +133,11 @@ export default async function handler(req: Request): Promise<Response> {
       txQuery,
     ])
 
-  if (catError) return json({ error: catError.message }, 500)
-  if (txError)  return json({ error: txError.message }, 500)
+  if (catError) { res.status(500).json({ error: catError.message }); return }
+  if (txError)  { res.status(500).json({ error: txError.message });  return }
   if (!transactions?.length) {
-    return json({ processed: 0, updated: 0, proposals: [], anomalies: [], hasMore: false, remaining: 0, estimatedCostCAD: 0 })
+    res.status(200).json({ processed: 0, updated: 0, proposals: [], anomalies: [], hasMore: false, remaining: 0, estimatedCostCAD: 0 })
+    return
   }
 
   // Build category maps in JS (no second DB round trip)
@@ -179,7 +209,7 @@ export default async function handler(req: Request): Promise<Response> {
   if (!dryRun) {
     const updates = proposals.map(p => ({
       id: p.id,
-      category_id: p.proposed_category_id,     // already validated above
+      category_id: p.proposed_category_id,
       merchant_name: p.merchant_name || null,
       is_recurring: p.is_recurring,
       tags: [],
@@ -198,13 +228,13 @@ export default async function handler(req: Request): Promise<Response> {
   // hasMore: if we got a full batch there are likely more — no expensive COUNT needed
   const hasMore = txList.length === batchSize
 
-  return json({
+  res.status(200).json({
     processed: txList.length,
     updated: dryRun ? 0 : updated,
     proposals: dryRun ? proposals : [],
     anomalies,
     hasMore,
-    remaining: hasMore ? '…' : 0,  // exact count avoided intentionally
+    remaining: hasMore ? '…' : 0,
     estimatedCostCAD,
     dryRun,
     tokens: { input: inputTokens, output: outputTokens },
@@ -221,7 +251,6 @@ function buildPrompt(
   transactions: TxRow[],
   categories: { id: string; name: string }[],
 ): string {
-  // Full UUIDs required so Claude can return exact matches
   const catList = categories.map(c => `${c.id} | ${c.name}`).join('\n')
 
   const txData = transactions.map(t => ({
@@ -234,7 +263,7 @@ function buildPrompt(
 
   return `Categorize ${transactions.length} Canadian transactions. Ottawa user: ~$184k salary + $24k rental income.
 
-CATEGORIES (id_prefix name):
+CATEGORIES (id | name):
 ${catList}
 
 TRANSACTIONS:
@@ -281,11 +310,4 @@ USER-SPECIFIC FACTS (apply these every time):
 
 Negative amount = expense. Positive = income, refund, or reimbursement.
 Return ONLY the JSON array.`
-}
-
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  })
 }
