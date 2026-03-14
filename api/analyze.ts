@@ -105,11 +105,13 @@ async function analyze(req: IncomingMessage, res: VercelRes): Promise<void> {
     dryRun?: boolean
     force?: boolean
     batchSize?: number
+    offset?: number
   }
 
   const dryRun    = body.dryRun ?? false
   const force     = body.force ?? false
   const batchSize = Math.min(body.batchSize ?? BATCH, 75)
+  const offset    = body.offset ?? 0
 
   const supabase  = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
   const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY })
@@ -121,16 +123,17 @@ async function analyze(req: IncomingMessage, res: VercelRes): Promise<void> {
     .eq('is_ignored', false)
     .eq('is_transfer', false)
     .order('date', { ascending: false })
-    .limit(batchSize)
+    .range(offset, offset + batchSize - 1)
 
   if (!force) {
     txQuery = txQuery.or('category_id.is.null,merchant_name.is.null')
   }
 
-  const [{ data: categories, error: catError }, { data: transactions, error: txError }] =
+  const [{ data: categories, error: catError }, { data: transactions, error: txError }, { data: rulesData }] =
     await Promise.all([
       supabase.from('categories').select('id, name, parent_id'),
       txQuery,
+      supabase.from('categorization_rules').select('*').eq('is_active', true).order('priority', { ascending: false }),
     ])
 
   if (catError) { res.status(500).json({ error: catError.message }); return }
@@ -150,32 +153,63 @@ async function analyze(req: IncomingMessage, res: VercelRes): Promise<void> {
   }))
   const catNameById = new Map(categoryList.map(c => [c.id, c.name]))
 
-  // ── Call Haiku ────────────────────────────────────────────────────────────
+  // ── Apply categorization rules before calling Claude ─────────────────────
   const txList = transactions as TxRow[]
+  const rules = (rulesData ?? []) as { pattern: string; match_type: string; category_id: string; merchant_name: string | null; is_recurring: boolean }[]
 
-  const response = await anthropic.messages.create({
-    model: HAIKU,
-    max_tokens: 4096,
-    system: buildSystem(),
-    messages: [{ role: 'user', content: buildPrompt(txList, categoryList) }],
-  })
+  const ruleMatched: ClaudeResult[] = []
+  const needsClaude: TxRow[] = []
 
-  const inputTokens  = response.usage.input_tokens
-  const outputTokens = response.usage.output_tokens
+  for (const tx of txList) {
+    const matched = matchRule(tx.payee, rules)
+    if (matched) {
+      ruleMatched.push({
+        id: tx.id,
+        category_id: matched.category_id,
+        merchant_name: matched.merchant_name ?? tx.payee,
+        is_recurring: matched.is_recurring,
+        anomaly: null,
+        tags: [],
+        confidence: 'high' as const,
+      })
+    } else {
+      needsClaude.push(tx)
+    }
+  }
+
+  // ── Call Haiku (only for unmatched transactions) ────────────────────────
+  let claudeResults: ClaudeResult[] = []
+  let inputTokens = 0
+  let outputTokens = 0
+
+  if (needsClaude.length > 0) {
+    const response = await anthropic.messages.create({
+      model: HAIKU,
+      max_tokens: 4096,
+      system: buildSystem(),
+      messages: [{ role: 'user', content: buildPrompt(needsClaude, categoryList) }],
+    })
+
+    inputTokens  = response.usage.input_tokens
+    outputTokens = response.usage.output_tokens
+
+    const text = response.content[0].type === 'text' ? response.content[0].text : ''
+    const jsonMatch = text.match(/\[[\s\S]*\]/)
+    if (jsonMatch) {
+      try { claudeResults = JSON.parse(jsonMatch[0]) } catch { /* ignore */ }
+    }
+  }
+
   const costUSD = (inputTokens / 1_000_000 * HAIKU_IN_PER_1M) + (outputTokens / 1_000_000 * HAIKU_OUT_PER_1M)
   const estimatedCostCAD = +(costUSD * USD_TO_CAD).toFixed(4)
 
-  let claudeResults: ClaudeResult[] = []
-  const text = response.content[0].type === 'text' ? response.content[0].text : ''
-  const match = text.match(/\[[\s\S]*\]/)
-  if (match) {
-    try { claudeResults = JSON.parse(match[0]) } catch { /* ignore */ }
-  }
+  // Merge rule-matched and Claude results
+  const allResults = [...ruleMatched, ...claudeResults]
 
   const validCategoryIds = new Set(categoryList.map(c => c.id))
 
   // ── Build proposals ───────────────────────────────────────────────────────
-  const proposals: Proposal[] = claudeResults
+  const proposals: Proposal[] = allResults
     .filter(r => r.id)
     .map(r => {
       const tx = txList.find(t => t.id === r.id)
@@ -238,6 +272,7 @@ async function analyze(req: IncomingMessage, res: VercelRes): Promise<void> {
     estimatedCostCAD,
     dryRun,
     tokens: { input: inputTokens, output: outputTokens },
+    nextOffset: offset + txList.length,
   })
 }
 
@@ -310,4 +345,34 @@ USER-SPECIFIC FACTS (apply these every time):
 
 Negative amount = expense. Positive = income, refund, or reimbursement.
 Return ONLY the JSON array.`
+}
+
+interface RuleRow {
+  pattern: string
+  match_type: string
+  category_id: string
+  merchant_name: string | null
+  is_recurring: boolean
+}
+
+function matchRule(payee: string, rules: RuleRow[]): RuleRow | null {
+  const lower = payee.toLowerCase()
+  for (const rule of rules) {
+    const pattern = rule.pattern.toLowerCase()
+    let matched = false
+    switch (rule.match_type) {
+      case 'exact':
+        matched = lower === pattern
+        break
+      case 'starts_with':
+        matched = lower.startsWith(pattern)
+        break
+      case 'contains':
+      default:
+        matched = lower.includes(pattern)
+        break
+    }
+    if (matched) return rule
+  }
+  return null
 }

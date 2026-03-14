@@ -12,6 +12,8 @@ import IncomeSourcesPage from '@/pages/IncomeSourcesPage'
 import BudgetPage from '@/pages/BudgetPage'
 import SpendingPage from '@/pages/SpendingPage'
 import ProjectionsPage from '@/pages/ProjectionsPage'
+import RulesPage from '@/pages/RulesPage'
+import RecurringExpensesPage from '@/pages/RecurringExpensesPage'
 
 export default function App() {
   return (
@@ -31,6 +33,8 @@ export default function App() {
         <Route path="/budget"         element={<BudgetPage />} />
         <Route path="/subscriptions"  element={<SubscriptionsPage />} />
         <Route path="/income"         element={<IncomeSourcesPage />} />
+        <Route path="/recurring"      element={<RecurringExpensesPage />} />
+        <Route path="/rules"          element={<RulesPage />} />
         <Route path="/projections"    element={<ProjectionsPage />} />
         <Route path="/goals"          element={<GoalsPage />} />
         <Route path="/upload"         element={<UploadPage />} />

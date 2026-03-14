@@ -4,7 +4,8 @@ import type { IncomeSource, Goal } from '@/types'
 export interface ProjectionMonth {
   month: string          // "2026-04"
   income: number
-  fixedExpenses: number  // subscriptions
+  recurringExpenses: number  // fixed bills (mortgage, insurance, utilities)
+  fixedExpenses: number      // subscriptions
   discretionary: number
   totalExpenses: number
   savings: number
@@ -22,6 +23,7 @@ export interface GoalProjection {
 export interface ProjectionInputs {
   incomeSources: IncomeSource[]
   monthlySubscriptions: number
+  monthlyRecurringExpenses?: number
   avgDiscretionary: number       // 3-month average
   budgetedDiscretionary?: number // if budgets set, use this instead
   goals: Goal[]
@@ -31,7 +33,7 @@ export interface ProjectionInputs {
 export function projectMonths(inputs: ProjectionInputs, months = 12): ProjectionMonth[] {
   const monthlyIncome = inputs.incomeSources
     .filter(s => s.is_active)
-    .reduce((sum, s) => sum + toMonthlyAmount(s.gross_cad, s.frequency), 0)
+    .reduce((sum, s) => sum + toMonthlyAmount(s.net_cad ?? s.gross_cad, s.frequency), 0)
 
   const baseDiscretionary = inputs.budgetedDiscretionary ?? inputs.avgDiscretionary
 
@@ -51,13 +53,15 @@ export function projectMonths(inputs: ProjectionInputs, months = 12): Projection
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1)
     const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
 
-    const totalExpenses = inputs.monthlySubscriptions + adjustedDiscretionary
+    const recurringExp = inputs.monthlyRecurringExpenses ?? 0
+    const totalExpenses = recurringExp + inputs.monthlySubscriptions + adjustedDiscretionary
     const savings = monthlyIncome - totalExpenses
     cumulative += savings
 
     result.push({
       month,
       income: monthlyIncome,
+      recurringExpenses: recurringExp,
       fixedExpenses: inputs.monthlySubscriptions,
       discretionary: adjustedDiscretionary,
       totalExpenses,

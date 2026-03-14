@@ -15,6 +15,7 @@ interface BatchResponse {
   estimatedCostCAD: number
   dryRun: boolean
   tokens?: { input: number; output: number }
+  nextOffset?: number
   error?: string
 }
 
@@ -66,12 +67,13 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
     setStage({ status: 'running', state: { ...state } })
 
     let hasMore = true
+    let offset = 0
     while (hasMore) {
       try {
         const res = await fetch('/api/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dryRun: false, force, batchSize: 50 }),
+          body: JSON.stringify({ dryRun: false, force, batchSize: 50, offset }),
         })
         const data = await res.json().catch(() => ({})) as BatchResponse
         if (!res.ok || data.error) throw new Error(data.error ?? `${res.status} ${res.statusText}`)
@@ -82,6 +84,7 @@ export default function AnalyzeButton({ force = false, label, onComplete }: Prop
         state.remaining       = typeof data.remaining === 'number' ? data.remaining : 0
         state.totalCostCAD   += data.estimatedCostCAD
         hasMore = data.hasMore
+        offset = data.nextOffset ?? (offset + data.processed)
 
         setStage({ status: 'running', state: { ...state } })
         if (data.processed === 0) break

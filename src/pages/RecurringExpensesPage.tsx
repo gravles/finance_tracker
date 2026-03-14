@@ -2,96 +2,90 @@ import { useEffect, useState } from 'react'
 import { Plus, Pencil, Trash2, X, Check } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, toMonthlyAmount } from '@/lib/utils'
-import type { IncomeSource, IncomeFrequency } from '@/types'
+import type { RecurringExpense, RecurringFrequency, Category } from '@/types'
 
-const INCOME_TYPES = ['employment', 'rental', 'investment', 'other'] as const
-const FREQUENCIES: IncomeFrequency[] = ['weekly', 'biweekly', 'semimonthly', 'monthly', 'annual', 'irregular']
+const FREQUENCIES: RecurringFrequency[] = ['weekly', 'biweekly', 'monthly', 'quarterly', 'annual']
 
 const emptyForm = {
   name: '',
-  type: 'employment' as IncomeSource['type'],
-  gross_cad: '',
-  net_cad: '',
-  frequency: 'biweekly' as IncomeFrequency,
+  category_id: '',
+  amount: '',
+  frequency: 'monthly' as RecurringFrequency,
   is_active: true,
   notes: '',
 }
 
-export default function IncomeSourcesPage() {
-  const [sources, setSources] = useState<IncomeSource[]>([])
+export default function RecurringExpensesPage() {
+  const [expenses, setExpenses] = useState<RecurringExpense[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState(emptyForm)
   const [showAdd, setShowAdd] = useState(false)
 
   useEffect(() => {
-    loadSources()
+    loadData()
   }, [])
 
-  async function loadSources() {
-    const { data } = await supabase
-      .from('income_sources')
-      .select('*')
-      .order('created_at', { ascending: false })
-    setSources((data ?? []) as IncomeSource[])
+  async function loadData() {
+    const [expRes, catRes] = await Promise.all([
+      supabase
+        .from('recurring_expenses')
+        .select('*, category:categories(id, name, parent_id)')
+        .order('created_at', { ascending: false }),
+      supabase.from('categories').select('id, name, parent_id').order('name'),
+    ])
+    setExpenses((expRes.data ?? []) as RecurringExpense[])
+    setCategories((catRes.data ?? []) as Category[])
     setLoading(false)
   }
 
-  const totalMonthlyGross = sources
-    .filter(s => s.is_active)
-    .reduce((sum, s) => sum + toMonthlyAmount(s.gross_cad, s.frequency), 0)
-
-  const totalMonthlyNet = sources
-    .filter(s => s.is_active)
-    .reduce((sum, s) => sum + toMonthlyAmount(s.net_cad ?? s.gross_cad, s.frequency), 0)
-
-  const totalMonthly = totalMonthlyGross
+  const activeExpenses = expenses.filter(e => e.is_active)
+  const totalMonthly = activeExpenses.reduce(
+    (sum, e) => sum + toMonthlyAmount(e.amount, e.frequency), 0
+  )
+  const totalAnnual = totalMonthly * 12
 
   async function handleSave() {
-    const gross = parseFloat(form.gross_cad)
-    if (!form.name.trim() || isNaN(gross) || gross <= 0) return
-
-    const netParsed = parseFloat(form.net_cad)
-    const net_cad = !isNaN(netParsed) && netParsed > 0 ? netParsed : null
+    const amount = parseFloat(form.amount)
+    if (!form.name.trim() || isNaN(amount) || amount <= 0) return
 
     const record = {
       name: form.name.trim(),
-      type: form.type,
-      gross_cad: gross,
-      net_cad,
+      category_id: form.category_id || null,
+      amount,
       frequency: form.frequency,
       is_active: form.is_active,
       notes: form.notes.trim() || null,
     }
 
     if (editingId) {
-      await supabase.from('income_sources').update(record).eq('id', editingId)
+      await supabase.from('recurring_expenses').update(record).eq('id', editingId)
     } else {
-      await supabase.from('income_sources').insert(record)
+      await supabase.from('recurring_expenses').insert(record)
     }
 
     setEditingId(null)
     setShowAdd(false)
     setForm(emptyForm)
-    await loadSources()
+    await loadData()
   }
 
   async function handleDelete(id: string) {
-    await supabase.from('income_sources').delete().eq('id', id)
-    await loadSources()
+    await supabase.from('recurring_expenses').delete().eq('id', id)
+    await loadData()
   }
 
-  function startEdit(s: IncomeSource) {
-    setEditingId(s.id)
+  function startEdit(e: RecurringExpense) {
+    setEditingId(e.id)
     setShowAdd(true)
     setForm({
-      name: s.name,
-      type: s.type,
-      gross_cad: String(s.gross_cad),
-      net_cad: s.net_cad != null ? String(s.net_cad) : '',
-      frequency: s.frequency,
-      is_active: s.is_active,
-      notes: s.notes ?? '',
+      name: e.name,
+      category_id: e.category_id ?? '',
+      amount: String(e.amount),
+      frequency: e.frequency,
+      is_active: e.is_active,
+      notes: e.notes ?? '',
     })
   }
 
@@ -101,14 +95,28 @@ export default function IncomeSourcesPage() {
     setForm(emptyForm)
   }
 
+  // Build category options with parent prefix
+  const parentMap = new Map(
+    categories.filter(c => !c.parent_id).map(c => [c.id, c.name])
+  )
+  const categoryOptions = categories.map(c => ({
+    id: c.id,
+    label: c.parent_id ? `${parentMap.get(c.parent_id) ?? ''} > ${c.name}` : c.name,
+  })).sort((a, b) => a.label.localeCompare(b.label))
+
+  function getCategoryLabel(catId: string | null): string {
+    if (!catId) return '—'
+    return categoryOptions.find(c => c.id === catId)?.label ?? '—'
+  }
+
   if (loading) return <div className="text-gray-400 text-sm">Loading...</div>
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-white">Income Sources</h1>
-          <p className="text-sm text-gray-400 mt-1">Track your recurring income</p>
+          <h1 className="text-2xl font-semibold text-white">Recurring Expenses</h1>
+          <p className="text-sm text-gray-400 mt-1">Track fixed bills like mortgage, insurance, and utilities</p>
         </div>
         {!showAdd && (
           <button
@@ -116,30 +124,24 @@ export default function IncomeSourcesPage() {
             className="flex items-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
           >
             <Plus size={16} />
-            Add Source
+            Add Expense
           </button>
         )}
       </div>
 
       {/* Summary */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         <div className="card-sm">
-          <div className="stat-label">Monthly Gross</div>
-          <div className="stat-value text-white mt-1">{formatCAD(totalMonthlyGross)}</div>
-          <div className="text-xs text-gray-500 mt-1">{formatCAD(totalMonthlyGross * 12)}/yr</div>
+          <div className="stat-label">Monthly Fixed Costs</div>
+          <div className="stat-value text-red-400 mt-1">{formatCAD(totalMonthly)}</div>
         </div>
         <div className="card-sm">
-          <div className="stat-label">Monthly Net</div>
-          <div className="stat-value text-green-400 mt-1">{formatCAD(totalMonthlyNet)}</div>
-          <div className="text-xs text-gray-500 mt-1">{formatCAD(totalMonthlyNet * 12)}/yr</div>
+          <div className="stat-label">Annual Total</div>
+          <div className="stat-value text-white mt-1">{formatCAD(totalAnnual)}</div>
         </div>
         <div className="card-sm">
-          <div className="stat-label">Active Sources</div>
-          <div className="stat-value text-white mt-1">{sources.filter(s => s.is_active).length}</div>
-        </div>
-        <div className="card-sm">
-          <div className="stat-label">Total Sources</div>
-          <div className="stat-value text-white mt-1">{sources.length}</div>
+          <div className="stat-label">Active Bills</div>
+          <div className="stat-value text-white mt-1">{activeExpenses.length}</div>
         </div>
       </div>
 
@@ -147,7 +149,7 @@ export default function IncomeSourcesPage() {
       {showAdd && (
         <div className="card space-y-4">
           <h3 className="text-sm font-medium text-white">
-            {editingId ? 'Edit Income Source' : 'New Income Source'}
+            {editingId ? 'Edit Recurring Expense' : 'New Recurring Expense'}
           </h3>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -156,39 +158,30 @@ export default function IncomeSourcesPage() {
                 type="text"
                 value={form.name}
                 onChange={e => setForm({ ...form, name: e.target.value })}
-                placeholder="e.g. Employment - Gartner"
+                placeholder="e.g. Mortgage, Car Insurance"
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
             </div>
             <div>
-              <label className="text-xs text-gray-400 block mb-1">Type</label>
+              <label className="text-xs text-gray-400 block mb-1">Category</label>
               <select
-                value={form.type}
-                onChange={e => setForm({ ...form, type: e.target.value as IncomeSource['type'] })}
+                value={form.category_id}
+                onChange={e => setForm({ ...form, category_id: e.target.value })}
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
               >
-                {INCOME_TYPES.map(t => (
-                  <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>
+                <option value="">None</option>
+                {categoryOptions.map(c => (
+                  <option key={c.id} value={c.id}>{c.label}</option>
                 ))}
               </select>
             </div>
             <div>
-              <label className="text-xs text-gray-400 block mb-1">Gross Amount (CAD)</label>
+              <label className="text-xs text-gray-400 block mb-1">Amount (CAD)</label>
               <input
                 type="number"
-                value={form.gross_cad}
-                onChange={e => setForm({ ...form, gross_cad: e.target.value })}
-                placeholder="Amount per pay period"
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 block mb-1">Net Amount (CAD)</label>
-              <input
-                type="number"
-                value={form.net_cad}
-                onChange={e => setForm({ ...form, net_cad: e.target.value })}
-                placeholder="Take-home pay (optional)"
+                value={form.amount}
+                onChange={e => setForm({ ...form, amount: e.target.value })}
+                placeholder="Amount per period"
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
             </div>
@@ -196,7 +189,7 @@ export default function IncomeSourcesPage() {
               <label className="text-xs text-gray-400 block mb-1">Frequency</label>
               <select
                 value={form.frequency}
-                onChange={e => setForm({ ...form, frequency: e.target.value as IncomeFrequency })}
+                onChange={e => setForm({ ...form, frequency: e.target.value as RecurringFrequency })}
                 className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
               >
                 {FREQUENCIES.map(f => (
@@ -245,60 +238,56 @@ export default function IncomeSourcesPage() {
 
       {/* Table */}
       <div className="card p-0 overflow-hidden">
-        {sources.length === 0 ? (
+        {expenses.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-gray-500">
-            <p className="text-sm">No income sources added yet.</p>
-            <p className="text-xs mt-1">Add your income sources to enable projections.</p>
+            <p className="text-sm">No recurring expenses added yet.</p>
+            <p className="text-xs mt-1">Add your fixed bills to improve projections accuracy.</p>
           </div>
         ) : (
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-800 text-gray-400 text-xs">
                 <th className="text-left px-4 py-3 font-medium">Name</th>
-                <th className="text-left px-4 py-3 font-medium">Type</th>
-                <th className="text-right px-4 py-3 font-medium">Gross</th>
-                <th className="text-right px-4 py-3 font-medium">Net</th>
+                <th className="text-left px-4 py-3 font-medium">Category</th>
+                <th className="text-right px-4 py-3 font-medium">Amount</th>
                 <th className="text-left px-4 py-3 font-medium">Frequency</th>
-                <th className="text-right px-4 py-3 font-medium">Monthly Net</th>
+                <th className="text-right px-4 py-3 font-medium">Monthly</th>
                 <th className="text-center px-4 py-3 font-medium">Status</th>
                 <th className="text-center px-4 py-3 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800/50">
-              {sources.map(s => (
-                <tr key={s.id} className="hover:bg-gray-800/30 transition-colors">
-                  <td className="px-4 py-3 font-medium text-white">{s.name}</td>
-                  <td className="px-4 py-3 text-gray-400 capitalize">{s.type}</td>
+              {expenses.map(e => (
+                <tr key={e.id} className="hover:bg-gray-800/30 transition-colors">
+                  <td className="px-4 py-3 font-medium text-white">{e.name}</td>
+                  <td className="px-4 py-3 text-gray-400">{getCategoryLabel(e.category_id)}</td>
                   <td className="px-4 py-3 text-right font-mono text-white">
-                    {formatCAD(s.gross_cad)}
+                    {formatCAD(e.amount)}
                   </td>
-                  <td className="px-4 py-3 text-right font-mono text-gray-400">
-                    {s.net_cad != null ? formatCAD(s.net_cad) : '—'}
-                  </td>
-                  <td className="px-4 py-3 text-gray-400 capitalize">{s.frequency}</td>
-                  <td className="px-4 py-3 text-right font-mono text-green-400">
-                    {formatCAD(toMonthlyAmount(s.net_cad ?? s.gross_cad, s.frequency))}
+                  <td className="px-4 py-3 text-gray-400 capitalize">{e.frequency}</td>
+                  <td className="px-4 py-3 text-right font-mono text-red-400">
+                    {formatCAD(toMonthlyAmount(e.amount, e.frequency))}
                   </td>
                   <td className="px-4 py-3 text-center">
                     <span className={`text-xs px-2 py-0.5 rounded-full ${
-                      s.is_active
+                      e.is_active
                         ? 'bg-green-400/10 text-green-400'
                         : 'bg-gray-700 text-gray-500'
                     }`}>
-                      {s.is_active ? 'Active' : 'Inactive'}
+                      {e.is_active ? 'Active' : 'Inactive'}
                     </span>
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-center gap-1.5">
                       <button
-                        onClick={() => startEdit(s)}
+                        onClick={() => startEdit(e)}
                         className="p-1.5 rounded text-gray-600 hover:text-gray-400 hover:bg-gray-800 transition-colors"
                         title="Edit"
                       >
                         <Pencil size={14} />
                       </button>
                       <button
-                        onClick={() => handleDelete(s.id)}
+                        onClick={() => handleDelete(e.id)}
                         className="p-1.5 rounded text-gray-600 hover:text-red-400 hover:bg-gray-800 transition-colors"
                         title="Delete"
                       >

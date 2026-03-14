@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabase'
 import { formatCAD, toMonthlyAmount, formatDate } from '@/lib/utils'
 import { projectMonths, projectGoals, type ProjectionMonth, type GoalProjection } from '@/lib/projections'
 import ProjectionLineChart from '@/components/charts/ProjectionLineChart'
-import type { IncomeSource, Goal, Subscription } from '@/types'
+import type { IncomeSource, Goal, Subscription, RecurringExpense } from '@/types'
 
 export default function ProjectionsPage() {
   const [incomeSources, setIncomeSources] = useState<IncomeSource[]>([])
@@ -22,10 +22,11 @@ export default function ProjectionsPage() {
         .toISOString().split('T')[0]
       const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
 
-      const [incomeRes, goalsRes, subsRes, txRes] = await Promise.all([
+      const [incomeRes, goalsRes, subsRes, recurringRes, txRes] = await Promise.all([
         supabase.from('income_sources').select('*').eq('is_active', true),
         supabase.from('goals').select('*').eq('is_active', true).order('sort_order'),
         supabase.from('subscriptions').select('*').eq('is_active', true),
+        supabase.from('recurring_expenses').select('*').eq('is_active', true),
         supabase
           .from('transactions')
           .select('amount, date')
@@ -39,6 +40,7 @@ export default function ProjectionsPage() {
       const income = (incomeRes.data ?? []) as IncomeSource[]
       const activeGoals = (goalsRes.data ?? []) as Goal[]
       const subs = (subsRes.data ?? []) as Subscription[]
+      const recurring = (recurringRes.data ?? []) as RecurringExpense[]
 
       setIncomeSources(income)
       setGoals(activeGoals)
@@ -46,6 +48,11 @@ export default function ProjectionsPage() {
       // Monthly subscription cost
       const monthlySubs = subs.reduce((sum, s) => {
         return sum + toMonthlyAmount(s.amount, s.frequency)
+      }, 0)
+
+      // Monthly recurring (fixed) expenses
+      const monthlyRecurring = recurring.reduce((sum, r) => {
+        return sum + toMonthlyAmount(r.amount, r.frequency)
       }, 0)
 
       // 3-month average discretionary (all non-sub expenses)
@@ -56,6 +63,7 @@ export default function ProjectionsPage() {
       const proj = projectMonths({
         incomeSources: income,
         monthlySubscriptions: monthlySubs,
+        monthlyRecurringExpenses: monthlyRecurring,
         avgDiscretionary: Math.max(0, avgDiscretionary),
         goals: activeGoals,
         adjustments: diningAdjust !== 0 ? [{ category: 'dining', pctChange: diningAdjust }] : undefined,
@@ -110,7 +118,7 @@ export default function ProjectionsPage() {
       {/* Key metrics */}
       <div className="grid grid-cols-4 gap-4">
         <div className="card-sm">
-          <div className="stat-label">Monthly Income</div>
+          <div className="stat-label">Monthly Net Income</div>
           <div className="stat-value text-green-400 mt-1">{formatCAD(monthlyIncome)}</div>
         </div>
         <div className="card-sm">

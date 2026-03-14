@@ -12,6 +12,8 @@ import {
   PieChart,
   BarChart3,
   LineChart,
+  Wand2,
+  CalendarClock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/hooks/useAuth'
@@ -23,6 +25,8 @@ const NAV = [
   { to: '/budget',        icon: BarChart3,       label: 'Budget' },
   { to: '/subscriptions', icon: Repeat,          label: 'Subscriptions' },
   { to: '/income',        icon: DollarSign,      label: 'Income' },
+  { to: '/recurring',     icon: CalendarClock,   label: 'Fixed Bills' },
+  { to: '/rules',         icon: Wand2,           label: 'Rules' },
   { to: '/projections',   icon: LineChart,       label: 'Projections' },
   { to: '/goals',         icon: Target,          label: 'Goals' },
   { to: '/upload',        icon: Upload,          label: 'Import' },

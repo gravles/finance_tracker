@@ -133,10 +133,43 @@ export interface IncomeSource {
   name: string
   type: 'employment' | 'rental' | 'investment' | 'other'
   gross_cad: number
+  net_cad: number | null
   frequency: IncomeFrequency
   is_active: boolean
   notes: string | null
   created_at: string
+}
+
+export type RuleMatchType = 'exact' | 'contains' | 'starts_with'
+
+export interface CategorizationRule {
+  id: string
+  pattern: string
+  match_type: RuleMatchType
+  category_id: string
+  merchant_name: string | null
+  is_recurring: boolean
+  priority: number
+  is_active: boolean
+  created_at: string
+  // joined
+  category?: Category
+}
+
+export type RecurringFrequency = 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'annual'
+
+export interface RecurringExpense {
+  id: string
+  name: string
+  category_id: string | null
+  amount: number
+  frequency: RecurringFrequency
+  is_active: boolean
+  notes: string | null
+  created_at: string
+  updated_at: string
+  // joined
+  category?: Category
 }
 
 export interface ChatSession {

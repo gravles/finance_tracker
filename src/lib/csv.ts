@@ -111,6 +111,14 @@ export async function importSimplifiCsv(
   const { data: aliases } = await supabase.from('category_aliases').select('alias, category_id')
   const aliasMap = new Map((aliases ?? []).map(a => [a.alias.toLowerCase(), a.category_id]))
 
+  // Load auto-categorization rules
+  const { data: rulesData } = await supabase
+    .from('categorization_rules')
+    .select('pattern, match_type, category_id, merchant_name, is_recurring')
+    .eq('is_active', true)
+    .order('priority', { ascending: false })
+  const rules = rulesData ?? []
+
   const rows: Record<string, unknown>[] = []
   const skippedHashes = new Set<string>()
   const errors: string[] = []
@@ -142,7 +150,17 @@ export async function importSimplifiCsv(
       // Simplifi uses "Parent:Child" e.g. "Dining & Drinks:Coffee"
       // Try: full string → child only → parent only → direct name match
       const rawCategory = row['Category']?.trim() ?? ''
-      const category_id = resolveCategory(rawCategory, aliasMap, categoryMap)
+      let category_id = resolveCategory(rawCategory, aliasMap, categoryMap)
+
+      // Apply auto-categorization rules if no category resolved
+      let merchant_name_from_rule: string | null = null
+      let is_recurring_from_rule = false
+      const ruleMatch = applyRule(payee, rules)
+      if (ruleMatch) {
+        if (!category_id) category_id = ruleMatch.category_id
+        merchant_name_from_rule = ruleMatch.merchant_name
+        is_recurring_from_rule = ruleMatch.is_recurring
+      }
 
       const is_ignored = row['Exclusion']?.trim().toLowerCase() === 'yes'
 
@@ -161,9 +179,9 @@ export async function importSimplifiCsv(
         amount,
         memo: row['Note']?.trim() || null,
         transaction_type: amount < 0 ? 'debit' : 'credit',
-        merchant_name: null,
+        merchant_name: merchant_name_from_rule,
         tags: row['Tags'] ? row['Tags'].split(',').map((t: string) => t.trim()).filter(Boolean) : [],
-        is_recurring: false,
+        is_recurring: is_recurring_from_rule,
         is_transfer: false,
         is_ignored,
         notes: null,
@@ -305,4 +323,34 @@ function describeDateFormat(raw: string): string {
   return normalized
     ? `"${raw}" → ${normalized} ✓`
     : `"${raw}" — format not recognised`
+}
+
+interface CsvRule {
+  pattern: string
+  match_type: string
+  category_id: string
+  merchant_name: string | null
+  is_recurring: boolean
+}
+
+function applyRule(payee: string, rules: CsvRule[]): CsvRule | null {
+  const lower = payee.toLowerCase()
+  for (const rule of rules) {
+    const pattern = rule.pattern.toLowerCase()
+    let matched = false
+    switch (rule.match_type) {
+      case 'exact':
+        matched = lower === pattern
+        break
+      case 'starts_with':
+        matched = lower.startsWith(pattern)
+        break
+      case 'contains':
+      default:
+        matched = lower.includes(pattern)
+        break
+    }
+    if (matched) return rule
+  }
+  return null
 }
