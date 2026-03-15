@@ -45,15 +45,21 @@ export default async function handler(req: Request): Promise<Response> {
   // ── Pull financial context in parallel ────────────────────────────────────
 
   const now = new Date()
-  const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1)
+  const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1)
     .toISOString().split('T')[0]
+  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+  const budgetStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
 
   const [
     { data: goals },
     { data: incomeSources },
     { data: subscriptions },
+    { data: recurringExpenses },
+    { data: accounts },
+    { data: budgets },
     { data: recentTx },
     { data: allTx },
+    { data: merchantTx },
   ] = await Promise.all([
     supabase.from('goals')
       .select('name, type, description, current_amount, target_amount, target_date, currency')
@@ -61,27 +67,46 @@ export default async function handler(req: Request): Promise<Response> {
       .order('sort_order'),
 
     supabase.from('income_sources')
-      .select('name, type, gross_cad, frequency')
+      .select('name, type, gross_cad, net_cad, frequency')
       .eq('is_active', true),
 
     supabase.from('subscriptions')
       .select('merchant_name, amount, frequency, keep_flag, is_active')
       .eq('is_active', true),
 
-    // Last 30 transactions verbatim for specific queries
+    supabase.from('recurring_expenses')
+      .select('name, amount, frequency, is_active, notes')
+      .eq('is_active', true),
+
+    supabase.from('accounts')
+      .select('name, type, is_active'),
+
+    supabase.from('budget_periods')
+      .select('category:categories(name), budgeted, spent')
+      .eq('period_start', budgetStart),
+
+    // Last 100 transactions for specific queries
     supabase.from('transactions')
-      .select('date, payee, amount, category:categories(name)')
+      .select('date, payee, merchant_name, amount, category:categories(name), account:accounts(name), is_recurring')
       .eq('is_ignored', false)
       .eq('is_transfer', false)
       .order('date', { ascending: false })
-      .limit(30),
+      .limit(100),
 
-    // All transactions in last 6 months for aggregation
+    // All transactions in last 12 months for aggregation
     supabase.from('transactions')
-      .select('date, amount, category:categories(name)')
+      .select('date, amount, category:categories(name), account:accounts(name)')
       .eq('is_ignored', false)
       .eq('is_transfer', false)
-      .gte('date', sixMonthsAgo),
+      .gte('date', twelveMonthsAgo),
+
+    // Top merchants by spend for "where do I spend the most" queries
+    supabase.from('transactions')
+      .select('merchant_name, payee, amount')
+      .eq('is_ignored', false)
+      .eq('is_transfer', false)
+      .lt('amount', 0)
+      .gte('date', twelveMonthsAgo),
   ])
 
   // ── Aggregate spending by category × month ────────────────────────────────
@@ -89,25 +114,25 @@ export default async function handler(req: Request): Promise<Response> {
   type CatMonth = Record<string, Record<string, number>>
   const spendByCatMonth: CatMonth = {}
   const monthlyTotals: Record<string, { income: number; expenses: number }> = {}
+  const spendByAccount: Record<string, number> = {}
 
   for (const tx of allTx ?? []) {
     const month = tx.date.slice(0, 7)
     const catName = (tx.category as { name: string } | null)?.name ?? 'Uncategorized'
+    const accName = (tx.account as { name: string } | null)?.name ?? 'Unknown'
     const amount = Number(tx.amount)
 
-    // Monthly income/expense totals
     if (!monthlyTotals[month]) monthlyTotals[month] = { income: 0, expenses: 0 }
     if (amount > 0) monthlyTotals[month].income += amount
     else monthlyTotals[month].expenses += Math.abs(amount)
 
-    // Category × month spending (expenses only)
     if (amount < 0) {
       if (!spendByCatMonth[catName]) spendByCatMonth[catName] = {}
       spendByCatMonth[catName][month] = (spendByCatMonth[catName][month] ?? 0) + Math.abs(amount)
+      spendByAccount[accName] = (spendByAccount[accName] ?? 0) + Math.abs(amount)
     }
   }
 
-  // Sort months
   const months = Object.keys(monthlyTotals).sort()
   const monthlyTable = months.map(m => ({
     month: m,
@@ -116,7 +141,6 @@ export default async function handler(req: Request): Promise<Response> {
     net: +(monthlyTotals[m].income - monthlyTotals[m].expenses).toFixed(2),
   }))
 
-  // Top categories with per-month breakdown
   const categoryBreakdown = Object.entries(spendByCatMonth)
     .map(([cat, byMonth]) => ({
       category: cat,
@@ -127,22 +151,56 @@ export default async function handler(req: Request): Promise<Response> {
     }))
     .sort((a, b) => b.total - a.total)
 
+  // ── Top merchants ─────────────────────────────────────────────────────────
+  const merchantSpend = new Map<string, { total: number; count: number }>()
+  for (const tx of merchantTx ?? []) {
+    const name = (tx.merchant_name || tx.payee || '').trim()
+    if (!name) continue
+    const key = name.toLowerCase()
+    const entry = merchantSpend.get(key) ?? { total: 0, count: 0 }
+    entry.total += Math.abs(tx.amount)
+    entry.count++
+    merchantSpend.set(key, entry)
+  }
+  const topMerchants = [...merchantSpend.entries()]
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, 25)
+    .map(([name, { total, count }]) => ({ merchant: name, total: +total.toFixed(2), transactions: count }))
+
+  // ── Budget vs actual for current month ────────────────────────────────────
+  const budgetSummary = (budgets ?? []).map(b => ({
+    category: (b.category as { name: string } | null)?.name ?? 'Unknown',
+    budgeted: b.budgeted,
+    spent: b.spent ?? 0,
+    remaining: +(b.budgeted - (b.spent ?? 0)).toFixed(2),
+  }))
+
+  // ── Account spending breakdown ────────────────────────────────────────────
+  const accountBreakdown = Object.entries(spendByAccount)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, total]) => ({ account: name, total_spend: +total.toFixed(2) }))
+
   const systemPrompt = `You are a personal finance assistant for a user in Ottawa, Ontario, Canada.
-You have access to their actual financial data below. Be concise and specific. Always use CAD.
+You have access to their actual financial data below. Be specific, actionable, and concise.
+Always use CAD. Use markdown formatting: tables, bold, bullet points.
 
 Use Canadian tax context: federal + Ontario provincial rates, CPP, EI premiums.
 For mortgage questions: use OSFI stress test (qualifying rate = contract rate + 2%, min 5.25%).
-Format money as $X,XXX.XX. Use markdown tables for comparisons.
+Format money as $X,XXX.XX.
+
+When the user asks about a specific merchant or category, look through the data and give exact figures.
+When comparing periods, show the numbers side by side.
+When giving advice, be specific with dollar amounts — not vague suggestions.
 
 USER CONTEXT:
-- Employer: Gartner Canada (IT consulting). Biweekly salary, ~$184k gross/year (~$7,077/biweekly gross).
+- Employer: Gartner Canada (IT consulting). Biweekly salary, ~$184k gross/year.
 - Large one-off Gartner deposits (>$5k net) are annual bonuses — exclude from recurring income projections.
 - Rental income: ~$2,000/month from a rental property.
 - "Align" = physiotherapy clinic (Health & Fitness), not a restaurant.
-- "Manulife" / "PSHCP" / "RSSFP" deposits = medical insurance reimbursements (income/refund).
+- "Manulife" / "PSHCP" / "RSSFP" deposits = medical insurance reimbursements.
 - Goals priority: 1) Mortgage qualification 2) Equalization payment fund 3) Travel 4) Emergency fund.
 - Spending alerts: flag Dining & Drinks > $800/month, Shopping > $600/month.
-- For income projections use recurring take-home salary only — exclude bonuses and reimbursements.
+- Today's date: ${now.toISOString().split('T')[0]}
 
 ## Income Sources
 ${JSON.stringify(incomeSources ?? [], null, 2)}
@@ -150,21 +208,36 @@ ${JSON.stringify(incomeSources ?? [], null, 2)}
 ## Financial Goals
 ${JSON.stringify(goals ?? [], null, 2)}
 
-## Active Subscriptions
+## Active Subscriptions (${(subscriptions ?? []).length} total)
 ${JSON.stringify(subscriptions ?? [], null, 2)}
 
-## Monthly Income vs Expenses (last 6 months)
+## Fixed Recurring Expenses (bills, mortgage, insurance)
+${JSON.stringify(recurringExpenses ?? [], null, 2)}
+
+## Accounts
+${JSON.stringify(accounts ?? [], null, 2)}
+
+## Budget vs Actual (${currentMonth})
+${budgetSummary.length > 0 ? JSON.stringify(budgetSummary, null, 2) : 'No budgets set for this month.'}
+
+## Monthly Income vs Expenses (last 12 months)
 ${JSON.stringify(monthlyTable, null, 2)}
 
-## Spending by Category (last 6 months, sorted by total)
+## Spending by Category (last 12 months, sorted by total)
 ${JSON.stringify(categoryBreakdown, null, 2)}
 
-## 30 Most Recent Transactions
+## Spending by Account (last 12 months)
+${JSON.stringify(accountBreakdown, null, 2)}
+
+## Top 25 Merchants by Spend (last 12 months)
+${JSON.stringify(topMerchants, null, 2)}
+
+## 100 Most Recent Transactions
 ${JSON.stringify(recentTx ?? [], null, 2)}`
 
   const response = await anthropic.messages.create({
-    model: 'claude-opus-4-6',
-    max_tokens: 1024,
+    model: 'claude-sonnet-4-5-20250929',
+    max_tokens: 4096,
     system: systemPrompt,
     messages: messages.map(m => ({ role: m.role, content: m.content })),
   })

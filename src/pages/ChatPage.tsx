@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Bot, User } from 'lucide-react'
+import { Send, Bot, User, Trash2 } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
 import { cn } from '@/lib/utils'
 
 interface Message {
@@ -8,12 +9,14 @@ interface Message {
 }
 
 const STARTER_PROMPTS = [
-  'How much did I spend on groceries last month?',
-  'What are my top 5 spending categories this year?',
-  'Am I on track to qualify for a mortgage by end of year?',
-  'Which subscriptions should I consider cancelling?',
-  'What\'s my average monthly surplus after expenses?',
-  'Show me my rental income vs property expenses',
+  'How much did I spend on groceries last month vs the month before?',
+  'What are my top 5 merchants by total spend this year?',
+  'Am I on track with my budget this month? Where am I over?',
+  'Which subscriptions cost the most annually? Any I should review?',
+  'What\'s my average monthly savings rate over the last 6 months?',
+  'Give me a full financial health summary with action items',
+  'How much do I spend on dining out vs cooking at home?',
+  'What would my mortgage qualification look like right now?',
 ]
 
 export default function ChatPage() {
@@ -36,7 +39,6 @@ export default function ChatPage() {
     setLoading(true)
 
     try {
-      // POST to Vercel Edge Function /api/chat
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -52,7 +54,7 @@ export default function ChatPage() {
         ...prev,
         {
           role: 'assistant',
-          content: `Sorry, I couldn't connect to the chat API. Make sure \`/api/chat\` is deployed. Error: ${e instanceof Error ? e.message : String(e)}`,
+          content: `Sorry, I couldn't connect to the chat API. Error: ${e instanceof Error ? e.message : String(e)}`,
         },
       ])
     } finally {
@@ -62,9 +64,22 @@ export default function ChatPage() {
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
-      <div className="mb-4">
-        <h1 className="text-2xl font-semibold text-white">Ask Claude</h1>
-        <p className="text-sm text-gray-400 mt-1">Query your finances in plain English</p>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">Ask Claude</h1>
+          <p className="text-sm text-gray-400 mt-1">
+            Has access to 12 months of transactions, budgets, goals, subscriptions, and accounts
+          </p>
+        </div>
+        {messages.length > 0 && (
+          <button
+            onClick={() => setMessages([])}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-300 hover:bg-gray-800 rounded-lg transition-colors"
+            title="Clear conversation"
+          >
+            <Trash2 size={13} /> Clear
+          </button>
+        )}
       </div>
 
       {/* Message list */}
@@ -73,10 +88,14 @@ export default function ChatPage() {
           <div className="space-y-4">
             <div className="flex items-center gap-3 p-4 bg-gray-900 border border-gray-800 rounded-xl">
               <Bot className="text-indigo-400 flex-shrink-0" size={20} />
-              <p className="text-sm text-gray-300">
-                Hi! I have access to your transaction history, goals, and subscriptions.
-                Ask me anything about your finances.
-              </p>
+              <div className="text-sm text-gray-300">
+                <p>I have access to your full financial picture:</p>
+                <ul className="mt-1.5 text-xs text-gray-500 space-y-0.5">
+                  <li>12 months of transactions, spending by category and merchant</li>
+                  <li>Income sources, budgets, goals, subscriptions, fixed bills</li>
+                  <li>Account breakdowns, monthly trends, savings rate</li>
+                </ul>
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-2">
               {STARTER_PROMPTS.map(p => (
@@ -106,12 +125,24 @@ export default function ChatPage() {
                 }
               </div>
               <div className={cn(
-                'max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap',
+                'max-w-[80%] rounded-xl px-4 py-3 text-sm leading-relaxed',
                 msg.role === 'user'
-                  ? 'bg-indigo-600 text-white'
+                  ? 'bg-indigo-600 text-white whitespace-pre-wrap'
                   : 'bg-gray-900 border border-gray-800 text-gray-200',
               )}>
-                {msg.content}
+                {msg.role === 'assistant' ? (
+                  <div className="prose prose-invert prose-sm max-w-none
+                    prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5
+                    prose-headings:mt-3 prose-headings:mb-1.5
+                    prose-table:text-xs prose-th:px-3 prose-th:py-1.5 prose-td:px-3 prose-td:py-1.5
+                    prose-th:border-gray-700 prose-td:border-gray-800
+                    prose-strong:text-white prose-code:text-indigo-300
+                    prose-a:text-indigo-400 prose-a:no-underline hover:prose-a:underline">
+                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                  </div>
+                ) : (
+                  msg.content
+                )}
               </div>
             </div>
           ))
@@ -145,7 +176,7 @@ export default function ChatPage() {
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendMessage(input)}
-          placeholder="Ask about your finances…"
+          placeholder="Ask about your finances..."
           disabled={loading}
           className="flex-1 px-4 py-3 bg-gray-900 border border-gray-700 rounded-xl text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-50"
         />
