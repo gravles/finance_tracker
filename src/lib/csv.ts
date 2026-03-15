@@ -104,6 +104,29 @@ export async function importSimplifiCsv(
   const { data: accounts } = await supabase.from('accounts').select('id, name')
   const accountMap = new Map((accounts ?? []).map(a => [a.name.toLowerCase(), a.id]))
 
+  // Auto-create accounts found in CSV but missing from DB
+  const csvAccountNames = new Set<string>()
+  for (const row of data) {
+    const name = (row['Account Name'] ?? row['Account'] ?? '').trim()
+    if (name && !accountMap.has(name.toLowerCase())) {
+      csvAccountNames.add(name)
+    }
+  }
+  if (csvAccountNames.size > 0) {
+    const newAccounts = Array.from(csvAccountNames).map(name => ({
+      id: crypto.randomUUID(),
+      name,
+      type: guessAccountType(name),
+      institution: '',
+      currency: 'CAD',
+      is_active: true,
+    }))
+    const { data: inserted } = await supabase.from('accounts').upsert(newAccounts, { onConflict: 'id' }).select('id, name')
+    for (const a of inserted ?? []) {
+      accountMap.set(a.name.toLowerCase(), a.id)
+    }
+  }
+
   const { data: categories } = await supabase.from('categories').select('id, name')
   const categoryMap = new Map((categories ?? []).map(c => [c.name.toLowerCase(), c.id]))
 
@@ -212,6 +235,40 @@ export async function importSimplifiCsv(
     } else {
       imported += count ?? 0
       skipped += batch.length - (count ?? 0)
+    }
+  }
+
+  // Backfill account_id on existing transactions that have null account
+  // This handles re-imports where accounts were missing on the first import
+  const hashToAccount = new Map<string, string>()
+  for (const row of rows) {
+    if (row.account_id && row.import_hash) {
+      hashToAccount.set(row.import_hash as string, row.account_id as string)
+    }
+  }
+  if (hashToAccount.size > 0) {
+    const { data: nullAccountTxs } = await supabase
+      .from('transactions')
+      .select('id, import_hash')
+      .is('account_id', null)
+      .limit(10000)
+
+    if (nullAccountTxs?.length) {
+      // Group by account_id for batch updates
+      const byAccount = new Map<string, string[]>()
+      for (const tx of nullAccountTxs) {
+        if (!tx.import_hash || !hashToAccount.has(tx.import_hash)) continue
+        const accId = hashToAccount.get(tx.import_hash)!
+        if (!byAccount.has(accId)) byAccount.set(accId, [])
+        byAccount.get(accId)!.push(tx.id)
+      }
+      for (const [accId, ids] of byAccount) {
+        // Supabase .in() supports up to ~300 items; chunk if needed
+        for (let i = 0; i < ids.length; i += 200) {
+          const chunk = ids.slice(i, i + 200)
+          await supabase.from('transactions').update({ account_id: accId }).in('id', chunk)
+        }
+      }
     }
   }
 
@@ -331,6 +388,17 @@ interface CsvRule {
   category_id: string
   merchant_name: string | null
   is_recurring: boolean
+}
+
+function guessAccountType(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.includes('visa') || lower.includes('mastercard') || lower.includes('credit') || lower.includes('amex')) return 'credit_card'
+  if (lower.includes('savings') || lower.includes('tfsa') || lower.includes('hisa')) return 'savings'
+  if (lower.includes('rrsp') || lower.includes('invest') || lower.includes('resp') || lower.includes('fhsa')) return 'investment'
+  if (lower.includes('mortgage')) return 'mortgage'
+  if (lower.includes('loan') || lower.includes('loc') || lower.includes('line of credit')) return 'loan'
+  if (lower.includes('cheq') || lower.includes('check')) return 'chequing'
+  return 'other'
 }
 
 function applyRule(payee: string, rules: CsvRule[]): CsvRule | null {

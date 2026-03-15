@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Search, ChevronLeft, ChevronRight, Filter, X, Check, Pencil, Wand2 } from 'lucide-react'
+import { Search, ChevronLeft, ChevronRight, Filter, X, Check, Pencil, Wand2, ArrowUp, ArrowDown } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, formatDate } from '@/lib/utils'
@@ -7,6 +7,9 @@ import type { Transaction, Category } from '@/types'
 import AnalyzeButton from '@/components/AnalyzeButton'
 
 const PAGE_SIZE = 50
+
+type SortColumn = 'date' | 'payee' | 'merchant_name' | 'amount'
+type SortDir = 'asc' | 'desc'
 
 interface Filters {
   search: string
@@ -55,6 +58,20 @@ export default function TransactionsPage() {
   })
   const [categories, setCategories] = useState<Category[]>([])
   const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([])
+
+  // Sorting
+  const [sortCol, setSortCol] = useState<SortColumn>('date')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
+
+  function toggleSort(col: SortColumn) {
+    if (sortCol === col) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortCol(col)
+      setSortDir(col === 'amount' ? 'desc' : 'asc')
+    }
+    setPage(0)
+  }
 
   // Editing state
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -114,14 +131,21 @@ export default function TransactionsPage() {
       .from('transactions')
       .select('*, account:accounts(name), category:categories(name, color)', { count: 'exact' })
       .eq('is_ignored', false)
-      .order('date', { ascending: false })
+      .order(sortCol, { ascending: sortDir === 'asc' })
       .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
 
     if (filters.search) {
       query = query.or(`payee.ilike.%${filters.search}%,merchant_name.ilike.%${filters.search}%`)
     }
     if (filters.categoryId) {
-      query = query.eq('category_id', filters.categoryId)
+      // If this is a parent category, include all its children too
+      const children = categories.filter(c => c.parent_id === filters.categoryId)
+      if (children.length > 0) {
+        const ids = [filters.categoryId, ...children.map(c => c.id)]
+        query = query.in('category_id', ids)
+      } else {
+        query = query.eq('category_id', filters.categoryId)
+      }
     }
     if (filters.accountId) {
       query = query.eq('account_id', filters.accountId)
@@ -157,7 +181,7 @@ export default function TransactionsPage() {
       setTotal(count ?? 0)
     }
     setLoading(false)
-  }, [page, filters])
+  }, [page, filters, sortCol, sortDir, categories])
 
   useEffect(() => { fetchTransactions() }, [fetchTransactions])
 
@@ -296,8 +320,6 @@ export default function TransactionsPage() {
           <p className="text-sm text-gray-400 mt-1">{total.toLocaleString()} total</p>
         </div>
         <AnalyzeButton
-          force
-          label="Re-analyze all"
           onComplete={() => fetchTransactions()}
         />
       </div>
@@ -521,12 +543,37 @@ export default function TransactionsPage() {
         <table className="w-full text-sm min-w-[700px]">
           <thead>
             <tr className="border-b border-gray-800 text-gray-400 text-xs">
-              <th className="text-left px-4 py-3 font-medium">Date</th>
-              <th className="text-left px-4 py-3 font-medium">Payee</th>
-              <th className="text-left px-4 py-3 font-medium">Merchant</th>
+              {([
+                { key: 'date' as SortColumn, label: 'Date', align: 'left' },
+                { key: 'payee' as SortColumn, label: 'Payee', align: 'left' },
+                { key: 'merchant_name' as SortColumn, label: 'Merchant', align: 'left' },
+              ]).map(col => (
+                <th
+                  key={col.key}
+                  onClick={() => toggleSort(col.key)}
+                  className={`text-${col.align} px-4 py-3 font-medium cursor-pointer select-none hover:text-gray-200 transition-colors`}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    {col.label}
+                    {sortCol === col.key && (
+                      sortDir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />
+                    )}
+                  </span>
+                </th>
+              ))}
               <th className="text-left px-4 py-3 font-medium">Category</th>
               <th className="text-left px-4 py-3 font-medium hidden md:table-cell">Account</th>
-              <th className="text-right px-4 py-3 font-medium">Amount</th>
+              <th
+                onClick={() => toggleSort('amount')}
+                className="text-right px-4 py-3 font-medium cursor-pointer select-none hover:text-gray-200 transition-colors"
+              >
+                <span className="inline-flex items-center justify-end gap-1">
+                  Amount
+                  {sortCol === 'amount' && (
+                    sortDir === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} />
+                  )}
+                </span>
+              </th>
               <th className="text-center px-4 py-3 font-medium w-16">Edit</th>
             </tr>
           </thead>

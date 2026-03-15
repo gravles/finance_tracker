@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { formatCAD } from '@/lib/utils'
 import CategoryTrendChart from '@/components/charts/CategoryTrendChart'
@@ -31,9 +31,12 @@ function formatMonthLabel(year: number, month: number) {
 
 export default function SpendingPage() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const now = new Date()
-  const [year, setYear] = useState(now.getFullYear())
-  const [month, setMonth] = useState(now.getMonth() + 1)
+  const initYear = parseInt(searchParams.get('year') ?? '') || now.getFullYear()
+  const initMonth = parseInt(searchParams.get('month') ?? '') || (now.getMonth() + 1)
+  const [year, setYear] = useState(initYear)
+  const [month, setMonth] = useState(initMonth)
   const [categories, setCategories] = useState<CategorySpend[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
@@ -188,6 +191,11 @@ export default function SpendingPage() {
   }, [year, month, start, end])
 
   useEffect(() => { loadData() }, [loadData])
+
+  // Keep URL in sync so browser back button preserves the month
+  useEffect(() => {
+    setSearchParams({ year: String(year), month: String(month) }, { replace: true })
+  }, [year, month, setSearchParams])
 
   function prevMonth() {
     if (month === 1) { setYear(year - 1); setMonth(12) }

@@ -34,7 +34,7 @@ export default async function handler(req: Request): Promise<Response> {
   // Fetch all non-ignored, non-transfer debit transactions
   const { data: txns, error } = await supabase
     .from('transactions')
-    .select('merchant_name, payee, amount, date, category_id')
+    .select('merchant_name, payee, amount, date, category_id, is_recurring')
     .eq('is_ignored', false)
     .eq('is_transfer', false)
     .lt('amount', 0)
@@ -43,25 +43,43 @@ export default async function handler(req: Request): Promise<Response> {
   if (error) return json({ error: error.message }, 500)
   if (!txns?.length) return json({ detected: [] })
 
-  // Group by normalized merchant name
-  const groups = new Map<string, { dates: string[]; amounts: number[]; category_id: string | null }>()
+  // Group by normalized merchant name, preserving best display name
+  const groups = new Map<string, {
+    dates: string[]
+    amounts: number[]
+    category_id: string | null
+    displayName: string
+    recurringFlags: number  // count of is_recurring=true
+  }>()
 
   for (const tx of txns) {
-    const key = (tx.merchant_name || tx.payee || '').trim().toLowerCase()
-    if (!key) continue
+    const raw = (tx.merchant_name || tx.payee || '').trim()
+    if (!raw) continue
+    const key = raw.toLowerCase()
 
-    const group = groups.get(key) ?? { dates: [], amounts: [], category_id: null }
+    const group = groups.get(key) ?? {
+      dates: [], amounts: [], category_id: null,
+      displayName: raw,  // use first (actual cased) name
+      recurringFlags: 0,
+    }
     group.dates.push(tx.date)
     group.amounts.push(Math.abs(tx.amount))
     if (tx.category_id) group.category_id = tx.category_id
+    if (tx.is_recurring) group.recurringFlags++
+    // Prefer merchant_name over payee for display
+    if (tx.merchant_name?.trim()) group.displayName = tx.merchant_name.trim()
     groups.set(key, group)
   }
 
-  // Analyze groups with 3+ transactions
   const detected: DetectedSub[] = []
 
-  for (const [merchant, group] of groups) {
-    if (group.dates.length < 3) continue
+  for (const [, group] of groups) {
+    const claudeFlagged = group.recurringFlags > 0
+
+    // If Claude flagged it as recurring, accept with just 2 occurrences
+    // Otherwise need 3+
+    if (!claudeFlagged && group.dates.length < 3) continue
+    if (group.dates.length < 2) continue
 
     // Sort dates and compute intervals
     const sorted = group.dates.sort()
@@ -74,33 +92,39 @@ export default async function handler(req: Request): Promise<Response> {
 
     // Median interval
     const sortedIntervals = [...intervals].sort((a, b) => a - b)
-    const median = sortedIntervals[Math.floor(sortedIntervals.length / 2)]
+    const median = sortedIntervals.length > 0
+      ? sortedIntervals[Math.floor(sortedIntervals.length / 2)]
+      : 30  // default to monthly if only 1 interval
 
-    // Classify frequency
-    const frequency = classifyFrequency(median)
+    // Classify frequency — use wider ranges
+    let frequency = classifyFrequency(median)
+
+    // If Claude flagged it but frequency detection failed, default to monthly
+    if (!frequency && claudeFlagged) {
+      frequency = 'monthly'
+    }
     if (!frequency) continue
 
-    // Amount consistency — compute coefficient of variation
+    // Amount consistency — coefficient of variation
     const amounts = group.amounts
     const avgAmount = amounts.reduce((s, a) => s + a, 0) / amounts.length
     const stdDev = Math.sqrt(amounts.reduce((s, a) => s + (a - avgAmount) ** 2, 0) / amounts.length)
     const cv = avgAmount > 0 ? stdDev / avgAmount : 1
 
-    // Confidence scoring
+    // Confidence scoring — Claude's flag boosts confidence
     let confidence: 'high' | 'medium' | 'low'
-    if (group.dates.length >= 4 && cv < 0.1) {
+    if (claudeFlagged && group.dates.length >= 3) {
       confidence = 'high'
+    } else if (claudeFlagged || (group.dates.length >= 4 && cv < 0.15)) {
+      confidence = 'medium'
     } else if (group.dates.length >= 3 && cv < 0.3) {
       confidence = 'medium'
     } else {
       confidence = 'low'
     }
 
-    // Format merchant name (title case the original)
-    const displayName = titleCase(merchant)
-
     detected.push({
-      merchant_name: displayName,
+      merchant_name: group.displayName,
       amount: Math.round(avgAmount * 100) / 100,
       frequency,
       confidence,
@@ -118,18 +142,12 @@ export default async function handler(req: Request): Promise<Response> {
 }
 
 function classifyFrequency(medianDays: number): DetectedSub['frequency'] | null {
-  if (medianDays >= 6 && medianDays <= 8) return 'weekly'
-  if (medianDays >= 12 && medianDays <= 16) return 'biweekly'
-  if (medianDays >= 25 && medianDays <= 35) return 'monthly'
-  if (medianDays >= 85 && medianDays <= 95) return 'quarterly'
-  if (medianDays >= 350 && medianDays <= 380) return 'annual'
+  if (medianDays >= 5 && medianDays <= 10) return 'weekly'
+  if (medianDays >= 11 && medianDays <= 18) return 'biweekly'
+  if (medianDays >= 19 && medianDays <= 45) return 'monthly'
+  if (medianDays >= 75 && medianDays <= 110) return 'quarterly'
+  if (medianDays >= 330 && medianDays <= 400) return 'annual'
   return null
-}
-
-function titleCase(str: string): string {
-  return str.replace(/\w\S*/g, txt =>
-    txt.charAt(0).toUpperCase() + txt.slice(1).toLowerCase()
-  )
 }
 
 function json(data: unknown, status = 200): Response {
