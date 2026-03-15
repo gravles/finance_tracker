@@ -43,6 +43,16 @@ export default async function handler(req: Request): Promise<Response> {
   if (error) return json({ error: error.message }, 500)
   if (!txns?.length) return json({ detected: [] })
 
+  // Normalize merchant names: strip common suffixes, collapse whitespace
+  function normalizeMerchant(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/\b(inc|ltd|llc|corp|co|canada|ca|limited|online|payment|pmt)\b\.?/gi, '')
+      .replace(/[^a-z0-9]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
   // Group by normalized merchant name, preserving best display name
   const groups = new Map<string, {
     dates: string[]
@@ -55,11 +65,12 @@ export default async function handler(req: Request): Promise<Response> {
   for (const tx of txns) {
     const raw = (tx.merchant_name || tx.payee || '').trim()
     if (!raw) continue
-    const key = raw.toLowerCase()
+    const key = normalizeMerchant(raw)
+    if (!key) continue
 
     const group = groups.get(key) ?? {
       dates: [], amounts: [], category_id: null,
-      displayName: raw,  // use first (actual cased) name
+      displayName: raw,
       recurringFlags: 0,
     }
     group.dates.push(tx.date)
@@ -75,11 +86,11 @@ export default async function handler(req: Request): Promise<Response> {
 
   for (const [, group] of groups) {
     const claudeFlagged = group.recurringFlags > 0
+    const recurringRatio = group.dates.length > 0 ? group.recurringFlags / group.dates.length : 0
 
-    // If Claude flagged it as recurring, accept with just 2 occurrences
-    // Otherwise need 3+
-    if (!claudeFlagged && group.dates.length < 3) continue
+    // Accept with just 2 occurrences if Claude flagged, otherwise need 2+ with good patterns
     if (group.dates.length < 2) continue
+    if (!claudeFlagged && group.dates.length < 2) continue
 
     // Sort dates and compute intervals
     const sorted = group.dates.sort()
@@ -87,16 +98,17 @@ export default async function handler(req: Request): Promise<Response> {
     for (let i = 1; i < sorted.length; i++) {
       const d1 = new Date(sorted[i - 1]).getTime()
       const d2 = new Date(sorted[i]).getTime()
-      intervals.push(Math.round((d2 - d1) / (1000 * 60 * 60 * 24)))
+      const days = Math.round((d2 - d1) / (1000 * 60 * 60 * 24))
+      if (days > 0) intervals.push(days)
     }
 
     // Median interval
     const sortedIntervals = [...intervals].sort((a, b) => a - b)
     const median = sortedIntervals.length > 0
       ? sortedIntervals[Math.floor(sortedIntervals.length / 2)]
-      : 30  // default to monthly if only 1 interval
+      : 30
 
-    // Classify frequency — use wider ranges
+    // Classify frequency
     let frequency = classifyFrequency(median)
 
     // If Claude flagged it but frequency detection failed, default to monthly
@@ -111,13 +123,20 @@ export default async function handler(req: Request): Promise<Response> {
     const stdDev = Math.sqrt(amounts.reduce((s, a) => s + (a - avgAmount) ** 2, 0) / amounts.length)
     const cv = avgAmount > 0 ? stdDev / avgAmount : 1
 
-    // Confidence scoring — Claude's flag boosts confidence
+    // Skip if amounts are wildly inconsistent AND Claude didn't flag it
+    // (allow up to 50% CV for variable bills like utilities)
+    if (cv > 0.50 && !claudeFlagged) continue
+    if (cv > 0.50 && group.dates.length < 3) continue
+
+    // Confidence scoring
     let confidence: 'high' | 'medium' | 'low'
-    if (claudeFlagged && group.dates.length >= 3) {
+    if (claudeFlagged && group.dates.length >= 3 && cv < 0.20) {
       confidence = 'high'
-    } else if (claudeFlagged || (group.dates.length >= 4 && cv < 0.15)) {
+    } else if (claudeFlagged && recurringRatio >= 0.5) {
+      confidence = 'high'
+    } else if (claudeFlagged || (group.dates.length >= 3 && cv < 0.30)) {
       confidence = 'medium'
-    } else if (group.dates.length >= 3 && cv < 0.3) {
+    } else if (group.dates.length >= 2 && cv < 0.15) {
       confidence = 'medium'
     } else {
       confidence = 'low'
@@ -142,11 +161,11 @@ export default async function handler(req: Request): Promise<Response> {
 }
 
 function classifyFrequency(medianDays: number): DetectedSub['frequency'] | null {
-  if (medianDays >= 5 && medianDays <= 10) return 'weekly'
-  if (medianDays >= 11 && medianDays <= 18) return 'biweekly'
-  if (medianDays >= 19 && medianDays <= 45) return 'monthly'
-  if (medianDays >= 75 && medianDays <= 110) return 'quarterly'
-  if (medianDays >= 330 && medianDays <= 400) return 'annual'
+  if (medianDays >= 4 && medianDays <= 10) return 'weekly'
+  if (medianDays >= 11 && medianDays <= 20) return 'biweekly'
+  if (medianDays >= 21 && medianDays <= 50) return 'monthly'
+  if (medianDays >= 51 && medianDays <= 120) return 'quarterly'
+  if (medianDays >= 121 && medianDays <= 400) return 'annual'
   return null
 }
 

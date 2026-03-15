@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Check, X, AlertCircle, RefreshCw, Search, Plus, Pencil, Trash2 } from 'lucide-react'
+import { Check, X, AlertCircle, RefreshCw, Search, Plus, Pencil, Trash2, ExternalLink } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, formatDate } from '@/lib/utils'
 import type { Subscription, KeepFlag, SubFrequency, Category } from '@/types'
@@ -31,6 +32,7 @@ const emptySubForm = {
 }
 
 export default function SubscriptionsPage() {
+  const navigate = useNavigate()
   const [subs, setSubs] = useState<Subscription[]>([])
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
@@ -357,7 +359,16 @@ export default function SubscriptionsPage() {
                 const flagCfg = flag ? FLAG_CONFIG[flag] : null
                 return (
                   <tr key={s.id} className="hover:bg-gray-800/30 transition-colors">
-                    <td className="px-4 py-3 font-medium text-white">{s.merchant_name}</td>
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={() => navigate(`/transactions?search=${encodeURIComponent(s.merchant_name)}`)}
+                        className="font-medium text-white hover:text-indigo-300 transition-colors flex items-center gap-1 group/link"
+                        title="View transactions"
+                      >
+                        {s.merchant_name}
+                        <ExternalLink size={11} className="opacity-0 group-hover/link:opacity-60 transition-opacity" />
+                      </button>
+                    </td>
                     <td className="px-4 py-3 text-gray-400 text-xs">
                       {s.category ? (s.category as { name: string }).name : '—'}
                     </td>

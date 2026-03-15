@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Plus, Pencil, Trash2, X, Check, Search } from 'lucide-react'
+import { Plus, Pencil, Trash2, X, Check, Search, ExternalLink } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, toMonthlyAmount } from '@/lib/utils'
 import type { RecurringExpense, RecurringFrequency, Category } from '@/types'
@@ -27,6 +28,7 @@ const emptyForm = {
 }
 
 export default function RecurringExpensesPage() {
+  const navigate = useNavigate()
   const [expenses, setExpenses] = useState<RecurringExpense[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
@@ -108,10 +110,18 @@ export default function RecurringExpensesPage() {
     setForm(emptyForm)
   }
 
+  function normalizeMerchant(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/\b(inc|ltd|llc|corp|co|canada|ca|limited|online|payment|pmt)\b\.?/gi, '')
+      .replace(/[^a-z0-9]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
   async function scanForBills() {
     setScanning(true)
     try {
-      // Fetch 12 months of expense transactions that are marked recurring
       const twelveMonthsAgo = new Date()
       twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12)
       const since = twelveMonthsAgo.toISOString().split('T')[0]
@@ -127,7 +137,7 @@ export default function RecurringExpensesPage() {
 
       if (!txns?.length) { setScanning(false); return }
 
-      // Group by merchant
+      // Group by normalized merchant name
       const groups = new Map<string, {
         displayName: string
         amounts: number[]
@@ -140,13 +150,14 @@ export default function RecurringExpensesPage() {
       for (const tx of txns) {
         const raw = (tx.merchant_name || tx.payee || '').trim()
         if (!raw) continue
-        const key = raw.toLowerCase()
+        const key = normalizeMerchant(raw)
+        if (!key) continue
 
         const g = groups.get(key) ?? {
           displayName: raw,
-          amounts: [], dates: [],
+          amounts: [] as number[], dates: [] as string[],
           recurringCount: 0,
-          categoryId: null, categoryName: null,
+          categoryId: null as string | null, categoryName: null as string | null,
         }
         g.amounts.push(Math.abs(tx.amount))
         g.dates.push(tx.date)
@@ -154,33 +165,35 @@ export default function RecurringExpensesPage() {
         if (tx.merchant_name?.trim()) g.displayName = tx.merchant_name.trim()
         if (tx.category_id) {
           g.categoryId = tx.category_id
-          g.categoryName = (tx.category as { name: string } | null)?.name ?? null
+          g.categoryName = (tx.category as unknown as { name: string } | null)?.name ?? null
         }
         groups.set(key, g)
       }
 
-      // Already-tracked names
-      const existingNames = new Set(expenses.map(e => e.name.toLowerCase()))
-      // Also check subscriptions so we don't duplicate
+      // Already-tracked names (normalized)
+      const existingNames = new Set(expenses.map(e => normalizeMerchant(e.name)))
       const { data: subs } = await supabase.from('subscriptions').select('merchant_name').eq('is_active', true)
       for (const s of subs ?? []) {
-        existingNames.add(s.merchant_name.toLowerCase())
+        existingNames.add(normalizeMerchant(s.merchant_name))
       }
 
       const bills: DetectedBill[] = []
 
-      for (const [, g] of groups) {
+      for (const [key, g] of groups) {
         if (g.amounts.length < 2) continue
-        if (existingNames.has(g.displayName.toLowerCase())) continue
+        if (existingNames.has(key)) continue
 
         // Amount consistency — coefficient of variation
         const avg = g.amounts.reduce((s, a) => s + a, 0) / g.amounts.length
         const stdDev = Math.sqrt(g.amounts.reduce((s, a) => s + (a - avg) ** 2, 0) / g.amounts.length)
         const cv = avg > 0 ? stdDev / avg : 1
 
-        // Fixed bills should have very consistent amounts (cv < 0.15)
-        // or be flagged recurring by Claude
-        if (cv > 0.20 && g.recurringCount === 0) continue
+        const claudeFlagged = g.recurringCount > 0
+
+        // Allow higher CV for variable bills (utilities), stricter without Claude flag
+        if (cv > 0.50 && !claudeFlagged) continue
+        if (cv > 0.50 && g.amounts.length < 3) continue
+        if (cv > 0.30 && !claudeFlagged && g.amounts.length < 3) continue
 
         // Compute intervals
         const sorted = [...g.dates].sort()
@@ -196,16 +209,23 @@ export default function RecurringExpensesPage() {
           ? [...intervals].sort((a, b) => a - b)[Math.floor(intervals.length / 2)]
           : 30
 
-        let frequency: RecurringFrequency = 'monthly'
-        if (median >= 5 && median <= 10) frequency = 'weekly'
-        else if (median >= 11 && median <= 18) frequency = 'biweekly'
-        else if (median >= 19 && median <= 45) frequency = 'monthly'
-        else if (median >= 75 && median <= 110) frequency = 'quarterly'
-        else if (median >= 330 && median <= 400) frequency = 'annual'
-        else if (g.recurringCount === 0) continue // can't determine frequency, skip
+        let frequency: RecurringFrequency | null = null
+        if (median >= 4 && median <= 10) frequency = 'weekly'
+        else if (median >= 11 && median <= 20) frequency = 'biweekly'
+        else if (median >= 21 && median <= 50) frequency = 'monthly'
+        else if (median >= 51 && median <= 120) frequency = 'quarterly'
+        else if (median >= 121 && median <= 400) frequency = 'annual'
+
+        // If Claude flagged but we can't determine frequency, default to monthly
+        if (!frequency && claudeFlagged) frequency = 'monthly'
+        if (!frequency) continue
+
+        const recurringRatio = g.amounts.length > 0 ? g.recurringCount / g.amounts.length : 0
 
         const confidence: 'high' | 'medium' =
-          (g.recurringCount > 0 && g.amounts.length >= 3 && cv < 0.10) ? 'high' : 'medium'
+          (claudeFlagged && recurringRatio >= 0.5 && g.amounts.length >= 3) ? 'high'
+          : (claudeFlagged && g.amounts.length >= 3 && cv < 0.20) ? 'high'
+          : 'medium'
 
         bills.push({
           merchant: g.displayName,
@@ -486,7 +506,16 @@ export default function RecurringExpensesPage() {
             <tbody className="divide-y divide-gray-800/50">
               {expenses.map(e => (
                 <tr key={e.id} className="hover:bg-gray-800/30 transition-colors">
-                  <td className="px-4 py-3 font-medium text-white">{e.name}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => navigate(`/transactions?search=${encodeURIComponent(e.name)}`)}
+                      className="font-medium text-white hover:text-indigo-300 transition-colors flex items-center gap-1 group/link"
+                      title="View transactions"
+                    >
+                      {e.name}
+                      <ExternalLink size={11} className="opacity-0 group-hover/link:opacity-60 transition-opacity" />
+                    </button>
+                  </td>
                   <td className="px-4 py-3 text-gray-400">{getCategoryLabel(e.category_id)}</td>
                   <td className="px-4 py-3 text-right font-mono text-white">
                     {formatCAD(e.amount)}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Plus, Pencil, Trash2, X, Check } from 'lucide-react'
+import { Plus, Pencil, Trash2, X, Check, ExternalLink } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, toMonthlyAmount } from '@/lib/utils'
 import type { IncomeSource, IncomeFrequency } from '@/types'
@@ -18,6 +19,7 @@ const emptyForm = {
 }
 
 export default function IncomeSourcesPage() {
+  const navigate = useNavigate()
   const [sources, setSources] = useState<IncomeSource[]>([])
   const [loading, setLoading] = useState(true)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -293,7 +295,16 @@ export default function IncomeSourcesPage() {
             <tbody className="divide-y divide-gray-800/50">
               {sources.map(s => (
                 <tr key={s.id} className="hover:bg-gray-800/30 transition-colors">
-                  <td className="px-4 py-3 font-medium text-white">{s.name}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => navigate(`/transactions?search=${encodeURIComponent(s.name)}`)}
+                      className="font-medium text-white hover:text-indigo-300 transition-colors flex items-center gap-1 group/link"
+                      title="View transactions"
+                    >
+                      {s.name}
+                      <ExternalLink size={11} className="opacity-0 group-hover/link:opacity-60 transition-opacity" />
+                    </button>
+                  </td>
                   <td className="px-4 py-3 text-gray-400 capitalize">{s.type}</td>
                   <td className="px-4 py-3 text-right font-mono text-white">
                     {formatCAD(s.gross_cad)}

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Search, ChevronLeft, ChevronRight, Filter, X, Check, Pencil, Wand2, ArrowUp, ArrowDown } from 'lucide-react'
+import { Search, ChevronLeft, ChevronRight, Filter, X, Check, Pencil, Wand2, ArrowUp, ArrowDown, Repeat, CalendarClock } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, formatDate } from '@/lib/utils'
@@ -306,6 +306,84 @@ export default function TransactionsPage() {
     setEditingId(null)
   }
 
+  // ── Add as subscription or fixed bill ──────────────────────────────
+  const [addingAs, setAddingAs] = useState<{ type: 'subscription' | 'bill'; tx: Transaction } | null>(null)
+  const [addingSaving, setAddingSaving] = useState(false)
+
+  async function addAsRecurring(type: 'subscription' | 'bill', tx: Transaction) {
+    setAddingSaving(true)
+    const merchantName = tx.merchant_name || tx.payee
+    const amount = Math.abs(tx.amount)
+
+    // Find matching transactions to determine frequency and average amount
+    const { data: matches } = await supabase
+      .from('transactions')
+      .select('amount, date')
+      .eq('is_ignored', false)
+      .eq('is_transfer', false)
+      .lt('amount', 0)
+      .or(`merchant_name.ilike.%${merchantName}%,payee.ilike.%${tx.payee}%`)
+      .order('date', { ascending: true })
+
+    const txDates = (matches ?? []).map(m => m.date).sort()
+    const amounts = (matches ?? []).map(m => Math.abs(m.amount))
+    const avgAmount = amounts.length > 0 ? amounts.reduce((s, a) => s + a, 0) / amounts.length : amount
+
+    // Detect frequency from intervals
+    let frequency: 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | 'annual' = 'monthly'
+    if (txDates.length >= 2) {
+      const intervals: number[] = []
+      for (let i = 1; i < txDates.length; i++) {
+        const days = Math.round(
+          (new Date(txDates[i]).getTime() - new Date(txDates[i - 1]).getTime()) / (1000 * 60 * 60 * 24)
+        )
+        if (days > 0) intervals.push(days)
+      }
+      if (intervals.length > 0) {
+        const median = [...intervals].sort((a, b) => a - b)[Math.floor(intervals.length / 2)]
+        if (median >= 5 && median <= 10) frequency = 'weekly'
+        else if (median >= 11 && median <= 18) frequency = 'biweekly'
+        else if (median >= 19 && median <= 45) frequency = 'monthly'
+        else if (median >= 75 && median <= 110) frequency = 'quarterly'
+        else if (median >= 330 && median <= 400) frequency = 'annual'
+      }
+    }
+
+    const roundedAmount = Math.round(avgAmount * 100) / 100
+
+    if (type === 'subscription') {
+      await supabase.from('subscriptions').insert({
+        merchant_name: merchantName,
+        amount: roundedAmount,
+        frequency,
+        category_id: tx.category_id || null,
+        is_active: true,
+        last_seen: txDates[txDates.length - 1] ?? tx.date,
+        occurrence_count: txDates.length,
+      })
+    } else {
+      await supabase.from('recurring_expenses').insert({
+        name: merchantName,
+        amount: roundedAmount,
+        frequency,
+        category_id: tx.category_id || null,
+        is_active: true,
+        notes: `Added from transaction, ${txDates.length} occurrences found`,
+      })
+    }
+
+    // Mark all matching transactions as recurring
+    await supabase
+      .from('transactions')
+      .update({ is_recurring: true })
+      .or(`merchant_name.ilike.%${merchantName}%,payee.ilike.%${tx.payee}%`)
+      .eq('is_ignored', false)
+
+    setAddingSaving(false)
+    setAddingAs(null)
+    await fetchTransactions()
+  }
+
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
   // Compute filtered totals
@@ -538,6 +616,44 @@ export default function TransactionsPage() {
         </div>
       )}
 
+      {/* Add as subscription/bill confirmation */}
+      {addingAs && (
+        <div className={`${addingAs.type === 'subscription' ? 'bg-indigo-500/10 border-indigo-500/30' : 'bg-amber-500/10 border-amber-500/30'} border rounded-lg px-4 py-3 flex items-start gap-3`}>
+          {addingAs.type === 'subscription'
+            ? <Repeat size={16} className="text-indigo-400 mt-0.5 flex-shrink-0" />
+            : <CalendarClock size={16} className="text-amber-400 mt-0.5 flex-shrink-0" />
+          }
+          <div className="flex-1 space-y-1">
+            <p className="text-sm text-white">
+              Add "<span className={addingAs.type === 'subscription' ? 'text-indigo-300' : 'text-amber-300'}>{addingAs.tx.merchant_name || addingAs.tx.payee}</span>"
+              as a {addingAs.type === 'subscription' ? 'subscription' : 'fixed bill'}?
+            </p>
+            <p className="text-xs text-gray-400">
+              This will find all matching transactions, detect the frequency and average amount, and mark them all as recurring.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              onClick={() => addAsRecurring(addingAs.type, addingAs.tx)}
+              disabled={addingSaving}
+              className={`flex items-center gap-1 px-3 py-1.5 text-white text-xs font-medium rounded transition-colors disabled:opacity-50 ${
+                addingAs.type === 'subscription'
+                  ? 'bg-indigo-600 hover:bg-indigo-700'
+                  : 'bg-amber-600 hover:bg-amber-700'
+              }`}
+            >
+              {addingSaving ? 'Adding...' : `Add ${addingAs.type === 'subscription' ? 'subscription' : 'bill'}`}
+            </button>
+            <button
+              onClick={() => setAddingAs(null)}
+              className="p-1.5 text-gray-500 hover:text-gray-300"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       <div className="card p-0 overflow-x-auto">
         <table className="w-full text-sm min-w-[700px]">
@@ -648,7 +764,7 @@ export default function TransactionsPage() {
                               />
                             </div>
                           </div>
-                          <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-3 flex-wrap">
                             <label className="flex items-center gap-1.5 text-xs text-gray-400">
                               <input
                                 type="checkbox"
@@ -658,6 +774,23 @@ export default function TransactionsPage() {
                               />
                               Recurring
                             </label>
+                            <span className="w-px h-4 bg-gray-700" />
+                            <button
+                              onClick={() => setAddingAs({ type: 'subscription', tx })}
+                              disabled={addingSaving}
+                              className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-indigo-300 hover:bg-indigo-500/10 rounded transition-colors"
+                              title="Add this merchant as a subscription and mark all matching transactions as recurring"
+                            >
+                              <Repeat size={11} /> Add as Subscription
+                            </button>
+                            <button
+                              onClick={() => setAddingAs({ type: 'bill', tx })}
+                              disabled={addingSaving}
+                              className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-amber-300 hover:bg-amber-500/10 rounded transition-colors"
+                              title="Add this merchant as a fixed bill and mark all matching transactions as recurring"
+                            >
+                              <CalendarClock size={11} /> Add as Fixed Bill
+                            </button>
                             <div className="flex-1" />
                             <button
                               onClick={saveEdit}
