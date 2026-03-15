@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Search, ChevronLeft, ChevronRight, Filter, X, Check, Pencil } from 'lucide-react'
+import { Search, ChevronLeft, ChevronRight, Filter, X, Check, Pencil, Wand2 } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, formatDate } from '@/lib/utils'
@@ -59,6 +59,17 @@ export default function TransactionsPage() {
   // Editing state
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editForm, setEditForm] = useState<EditForm>({ category_id: '', merchant_name: '', payee: '', is_recurring: false, notes: '' })
+
+  // Rule suggestion after category correction
+  const [rulePrompt, setRulePrompt] = useState<{
+    payee: string
+    merchantName: string
+    categoryId: string
+    categoryLabel: string
+    isRecurring: boolean
+    matchCount: number
+  } | null>(null)
+  const [ruleSaving, setRuleSaving] = useState(false)
 
   // Initialize filters from URL params
   const [filters, setFilters] = useState<Filters>(() => ({
@@ -189,14 +200,81 @@ export default function TransactionsPage() {
 
   async function saveEdit() {
     if (!editingId) return
+    const tx = transactions.find(t => t.id === editingId)
+    const oldCategoryId = tx?.category_id ?? ''
+    const newCategoryId = editForm.category_id || null
+
     await supabase.from('transactions').update({
-      category_id: editForm.category_id || null,
+      category_id: newCategoryId,
       merchant_name: editForm.merchant_name.trim() || null,
       payee: editForm.payee.trim(),
       is_recurring: editForm.is_recurring,
       notes: editForm.notes.trim() || null,
     }).eq('id', editingId)
+
+    // If category was changed, offer to create a rule
+    if (tx && newCategoryId && newCategoryId !== oldCategoryId) {
+      const payeePattern = tx.payee.toLowerCase().trim()
+      // Check if a rule already exists for this payee pattern
+      const { data: existing } = await supabase
+        .from('categorization_rules')
+        .select('id')
+        .ilike('pattern', payeePattern)
+        .limit(1)
+
+      if (!existing || existing.length === 0) {
+        // Count how many other transactions share this payee pattern
+        const { count } = await supabase
+          .from('transactions')
+          .select('id', { count: 'exact', head: true })
+          .ilike('payee', `%${payeePattern}%`)
+
+        const catLabel = categoryOptions.find(c => c.id === newCategoryId)?.label ?? 'selected category'
+
+        setRulePrompt({
+          payee: tx.payee,
+          merchantName: editForm.merchant_name.trim(),
+          categoryId: newCategoryId,
+          categoryLabel: catLabel,
+          isRecurring: editForm.is_recurring,
+          matchCount: (count ?? 1),
+        })
+      }
+    }
+
     setEditingId(null)
+    await fetchTransactions()
+  }
+
+  async function createRuleFromPrompt() {
+    if (!rulePrompt) return
+    setRuleSaving(true)
+    // Extract a clean keyword from the payee for matching
+    const pattern = rulePrompt.payee.toLowerCase().trim()
+    await supabase.from('categorization_rules').insert({
+      pattern,
+      match_type: 'contains',
+      category_id: rulePrompt.categoryId,
+      merchant_name: rulePrompt.merchantName || null,
+      is_recurring: rulePrompt.isRecurring,
+      priority: 0,
+      is_active: true,
+    })
+
+    // Also update all other transactions matching this pattern to the same category
+    if (rulePrompt.matchCount > 1) {
+      await supabase
+        .from('transactions')
+        .update({
+          category_id: rulePrompt.categoryId,
+          ...(rulePrompt.merchantName ? { merchant_name: rulePrompt.merchantName } : {}),
+          is_recurring: rulePrompt.isRecurring,
+        })
+        .ilike('payee', `%${pattern}%`)
+    }
+
+    setRuleSaving(false)
+    setRulePrompt(null)
     await fetchTransactions()
   }
 
@@ -402,6 +480,39 @@ export default function TransactionsPage() {
               <button onClick={() => updateFilter('recurring', '')} className="hover:text-white"><X size={10} /></button>
             </span>
           )}
+        </div>
+      )}
+
+      {/* Rule creation prompt */}
+      {rulePrompt && (
+        <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-4 py-3 flex items-start gap-3">
+          <Wand2 size={16} className="text-indigo-400 mt-0.5 flex-shrink-0" />
+          <div className="flex-1 space-y-1">
+            <p className="text-sm text-white">
+              Create a rule so all "<span className="text-indigo-300">{rulePrompt.payee}</span>" transactions
+              are categorized as <span className="text-indigo-300">{rulePrompt.categoryLabel}</span>?
+            </p>
+            <p className="text-xs text-gray-400">
+              {rulePrompt.matchCount > 1
+                ? `This will also update ${rulePrompt.matchCount - 1} other matching transaction${rulePrompt.matchCount - 1 === 1 ? '' : 's'}.`
+                : 'Future imports and re-analysis will use this rule automatically.'}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              onClick={createRuleFromPrompt}
+              disabled={ruleSaving}
+              className="flex items-center gap-1 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded transition-colors disabled:opacity-50"
+            >
+              {ruleSaving ? 'Saving…' : 'Create rule'}
+            </button>
+            <button
+              onClick={() => setRulePrompt(null)}
+              className="p-1.5 text-gray-500 hover:text-gray-300"
+            >
+              <X size={14} />
+            </button>
+          </div>
         </div>
       )}
 
