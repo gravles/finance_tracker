@@ -3,7 +3,9 @@ import { useNavigate } from 'react-router-dom'
 import {
   TrendingDown, TrendingUp, Wallet, PiggyBank,
   ArrowRight, ArrowUpRight, ArrowDownRight,
-  CreditCard, Receipt,
+  CreditCard, Receipt, Upload, Bot, Zap,
+  CheckCircle2, Clock, AlertTriangle,
+  Building2,
 } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, formatDate, toMonthlyAmount } from '@/lib/utils'
@@ -13,6 +15,8 @@ import BudgetProgressBar from '@/components/BudgetProgressBar'
 import SpendingAlerts from '@/components/SpendingAlerts'
 import GoalInsights from '@/components/GoalInsights'
 import type { Goal, SpendingByCategory, MonthlySpend } from '@/types'
+
+/* ─── Interfaces ──────────────────────────────────────────────────────────── */
 
 interface RecentTx {
   id: string
@@ -24,10 +28,11 @@ interface RecentTx {
   account: { name: string } | null
 }
 
-interface UpcomingBill {
+interface FixedCost {
   name: string
   amount: number
   type: 'subscription' | 'bill'
+  paid: boolean
 }
 
 interface TopMerchant {
@@ -36,6 +41,22 @@ interface TopMerchant {
   count: number
 }
 
+interface CategoryChange {
+  name: string
+  color: string | null
+  current: number
+  previous: number
+  change: number // percentage
+}
+
+interface AccountBalance {
+  name: string
+  type: string
+  balance: number
+}
+
+/* ─── Component ───────────────────────────────────────────────────────────── */
+
 export default function DashboardPage() {
   const navigate = useNavigate()
   const [goals, setGoals] = useState<Goal[]>([])
@@ -43,22 +64,31 @@ export default function DashboardPage() {
   const [monthly, setMonthly] = useState<MonthlySpend[]>([])
   const [budgets, setBudgets] = useState<{ category: string; budgeted: number; spent: number }[]>([])
   const [recentTx, setRecentTx] = useState<RecentTx[]>([])
-  const [upcomingBills, setUpcomingBills] = useState<UpcomingBill[]>([])
+  const [fixedCosts, setFixedCosts] = useState<FixedCost[]>([])
   const [topMerchants, setTopMerchants] = useState<TopMerchant[]>([])
   const [savingsRate, setSavingsRate] = useState<number | null>(null)
   const [uncategorizedCount, setUncategorizedCount] = useState(0)
   const [loading, setLoading] = useState(true)
 
+  // New state for 7 features
+  const [projectedSpend, setProjectedSpend] = useState<number | null>(null)
+  const [largestTx, setLargestTx] = useState<RecentTx[]>([])
+  const [categoryChanges, setCategoryChanges] = useState<CategoryChange[]>([])
+  const [recurringTotal, setRecurringTotal] = useState(0)
+  const [discretionaryTotal, setDiscretionaryTotal] = useState(0)
+  const [accountBalances, setAccountBalances] = useState<AccountBalance[]>([])
+  const [totalNetWorth, setTotalNetWorth] = useState<number | null>(null)
+
   const now = new Date()
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
   const monthStart = `${currentMonth}-01`
-  const prevMonthStart = (() => {
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+  const dayOfMonth = now.getDate()
+  const monthProgress = (dayOfMonth / daysInMonth) * 100
+
+  const prevMonthStr = (() => {
     const d = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`
-  })()
-  const prevMonthEnd = (() => {
-    const d = new Date(now.getFullYear(), now.getMonth(), 0)
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
   })()
 
   useEffect(() => {
@@ -68,15 +98,15 @@ export default function DashboardPage() {
 
       const [
         goalsRes, txRes, budgetRes, recentRes,
-        subsRes, billsRes, incomeRes, prevTxRes,
-        uncatRes,
+        subsRes, billsRes, incomeRes, uncatRes,
+        largestRes, accountsRes, allTimeTxRes,
       ] = await Promise.all([
         supabase.from('goals').select('*').eq('is_active', true).order('sort_order'),
 
         // 6 months of transactions for charts
         supabase
           .from('transactions')
-          .select('amount, date, category:categories(id, name, color, parent_id)')
+          .select('amount, date, category:categories(id, name, color, parent_id), is_recurring')
           .gte('date', sixMonthsAgo)
           .eq('is_ignored', false)
           .eq('is_transfer', false),
@@ -97,30 +127,41 @@ export default function DashboardPage() {
           .limit(8),
 
         // Active subscriptions
-        supabase.from('subscriptions').select('merchant_name, amount').eq('is_active', true),
+        supabase.from('subscriptions').select('merchant_name, amount, frequency').eq('is_active', true),
 
         // Active recurring expenses
-        supabase.from('recurring_expenses').select('name, amount').eq('is_active', true),
+        supabase.from('recurring_expenses').select('name, amount, frequency').eq('is_active', true),
 
         // Income sources
         supabase.from('income_sources').select('gross_cad, net_cad, frequency').eq('is_active', true),
 
-        // Previous month transactions for comparison
-        supabase
-          .from('transactions')
-          .select('amount, date, merchant_name, payee')
-          .gte('date', prevMonthStart)
-          .lte('date', prevMonthEnd)
-          .eq('is_ignored', false)
-          .eq('is_transfer', false),
-
-        // Uncategorized transactions count
+        // Uncategorized count
         supabase
           .from('transactions')
           .select('id', { count: 'exact', head: true })
           .is('category_id', null)
           .eq('is_ignored', false)
           .eq('is_transfer', false),
+
+        // Largest transactions this month
+        supabase
+          .from('transactions')
+          .select('id, date, payee, merchant_name, amount, category:categories(name, color), account:accounts(name)')
+          .gte('date', monthStart)
+          .eq('is_ignored', false)
+          .eq('is_transfer', false)
+          .lt('amount', 0)
+          .order('amount', { ascending: true })
+          .limit(5),
+
+        // All accounts
+        supabase.from('accounts').select('id, name, type').eq('is_active', true),
+
+        // All transactions for net worth (sum per account)
+        supabase
+          .from('transactions')
+          .select('amount, account_id')
+          .eq('is_ignored', false),
       ])
 
       setGoals((goalsRes.data ?? []) as Goal[])
@@ -128,7 +169,7 @@ export default function DashboardPage() {
 
       const txns = txRes.data ?? []
 
-      // Spending by category (current month)
+      // ── Spending by category (current month) ───────────────────────
       const thisMonthTxns = txns.filter(t => t.date >= monthStart && t.amount < 0)
       const catMap = new Map<string, SpendingByCategory>()
       for (const t of thisMonthTxns) {
@@ -151,7 +192,7 @@ export default function DashboardPage() {
       }
       setSpending(Array.from(catMap.values()).sort((a, b) => b.total - a.total).slice(0, 10))
 
-      // Monthly income/expense for 6 months
+      // ── Monthly income/expense (6 months) ──────────────────────────
       const monthMap = new Map<string, MonthlySpend>()
       for (const t of txns) {
         const month = t.date.slice(0, 7)
@@ -163,18 +204,15 @@ export default function DashboardPage() {
       }
       setMonthly(Array.from(monthMap.values()).sort((a, b) => a.month.localeCompare(b.month)))
 
-      // Budget progress — compute spent from this month's transactions
+      // ── Budget progress ────────────────────────────────────────────
       const budgetPeriods = (budgetRes.data ?? []) as unknown as
         { budgeted: number; category_id: string; category: { name: string } | null }[]
-
-      // Sum spending per parent category for current month
       const catSpendMap = new Map<string, number>()
       for (const t of thisMonthTxns) {
         const cat = t.category as unknown as { id: string; parent_id: string | null } | null
         const parentId = cat?.parent_id ?? cat?.id ?? 'uncategorized'
         catSpendMap.set(parentId, (catSpendMap.get(parentId) ?? 0) + Math.abs(t.amount))
       }
-
       const budgetItems = budgetPeriods.map(b => ({
         category: (b.category as unknown as { name: string } | null)?.name ?? 'Unknown',
         budgeted: b.budgeted,
@@ -185,30 +223,47 @@ export default function DashboardPage() {
         .slice(0, 6)
       setBudgets(budgetItems)
 
-      // Recent transactions
+      // ── Recent transactions ────────────────────────────────────────
       setRecentTx((recentRes.data ?? []) as unknown as RecentTx[])
 
-      // Upcoming bills
-      const bills: UpcomingBill[] = [
-        ...(subsRes.data ?? []).map(s => ({
-          name: s.merchant_name, amount: s.amount, type: 'subscription' as const,
-        })),
-        ...(billsRes.data ?? []).map(b => ({
-          name: b.name, amount: b.amount, type: 'bill' as const,
-        })),
-      ].sort((a, b) => b.amount - a.amount).slice(0, 8)
-      setUpcomingBills(bills)
+      // ── Largest transactions (Feature 2) ───────────────────────────
+      setLargestTx((largestRes.data ?? []) as unknown as RecentTx[])
 
-      // Top merchants this month
-      const { data: merchantTxData } = await supabase
+      // ── Fixed costs with payment status (Feature 5) ────────────────
+      // Get this month's merchants to check what's been paid
+      const { data: thisMonthMerchantData } = await supabase
         .from('transactions')
         .select('merchant_name, payee, amount')
         .gte('date', monthStart)
         .eq('is_ignored', false)
         .eq('is_transfer', false)
         .lt('amount', 0)
+
+      const paidMerchants = new Set<string>()
+      for (const t of thisMonthMerchantData ?? []) {
+        const name = (t.merchant_name || t.payee || '').trim().toLowerCase()
+        if (name) paidMerchants.add(name)
+      }
+
+      const costs: FixedCost[] = [
+        ...(subsRes.data ?? []).map(s => ({
+          name: s.merchant_name,
+          amount: s.amount,
+          type: 'subscription' as const,
+          paid: paidMerchants.has(s.merchant_name.toLowerCase()),
+        })),
+        ...(billsRes.data ?? []).map(b => ({
+          name: b.name,
+          amount: b.amount,
+          type: 'bill' as const,
+          paid: paidMerchants.has(b.name.toLowerCase()),
+        })),
+      ].sort((a, b) => b.amount - a.amount)
+      setFixedCosts(costs)
+
+      // ── Top merchants ──────────────────────────────────────────────
       const mMap = new Map<string, { name: string; total: number; count: number }>()
-      for (const t of merchantTxData ?? []) {
+      for (const t of thisMonthMerchantData ?? []) {
         const raw = (t.merchant_name || t.payee || '').trim()
         if (!raw) continue
         const key = raw.toLowerCase()
@@ -219,27 +274,108 @@ export default function DashboardPage() {
         mMap.set(key, entry)
       }
       setTopMerchants(
-        [...mMap.values()]
-          .sort((a, b) => b.total - a.total)
-          .slice(0, 7)
+        [...mMap.values()].sort((a, b) => b.total - a.total).slice(0, 7)
           .map(m => ({ name: m.name, total: m.total, count: m.count }))
       )
 
-      // Savings rate (3-month average)
+      // ── Spending pace projector (Feature 1) ────────────────────────
+      const totalSpentSoFar = thisMonthTxns.reduce((s, t) => s + Math.abs(t.amount), 0)
+      if (dayOfMonth > 1) {
+        const dailyRate = totalSpentSoFar / dayOfMonth
+        setProjectedSpend(dailyRate * daysInMonth)
+      }
+
+      // ── Category vs last month (Feature 3) ─────────────────────────
+      const prevMonthTxns = txns.filter(t => t.date.slice(0, 7) === prevMonthStr && t.amount < 0)
+      const prevCatMap = new Map<string, { name: string; color: string | null; total: number }>()
+      for (const t of prevMonthTxns) {
+        const cat = t.category as unknown as { id: string; name: string; color: string | null; parent_id: string | null } | null
+        const parentId = cat?.parent_id ?? cat?.id ?? 'uncategorized'
+        const existing = prevCatMap.get(parentId)
+        if (existing) {
+          existing.total += Math.abs(t.amount)
+        } else {
+          prevCatMap.set(parentId, {
+            name: cat?.name ?? 'Uncategorized',
+            color: cat?.color ?? null,
+            total: Math.abs(t.amount),
+          })
+        }
+      }
+
+      // Merge current + previous
+      const allCatIds = new Set([...catMap.keys(), ...prevCatMap.keys()])
+      const changes: CategoryChange[] = []
+      for (const id of allCatIds) {
+        const curr = catMap.get(id)
+        const prev = prevCatMap.get(id)
+        const currentTotal = curr?.total ?? 0
+        const previousTotal = prev?.total ?? 0
+        if (currentTotal === 0 && previousTotal === 0) continue
+        const changePct = previousTotal > 0
+          ? ((currentTotal - previousTotal) / previousTotal) * 100
+          : currentTotal > 0 ? 100 : 0
+        changes.push({
+          name: curr?.category_name ?? prev?.name ?? 'Unknown',
+          color: curr?.category_color ?? prev?.color ?? null,
+          current: currentTotal,
+          previous: previousTotal,
+          change: changePct,
+        })
+      }
+      changes.sort((a, b) => Math.abs(b.change) - Math.abs(a.change))
+      setCategoryChanges(changes.slice(0, 8))
+
+      // ── Recurring vs discretionary (Feature 4) ─────────────────────
+      let recurSum = 0
+      let discSum = 0
+      for (const t of thisMonthTxns) {
+        const amt = Math.abs(t.amount)
+        if (t.is_recurring) recurSum += amt
+        else discSum += amt
+      }
+      // Also add expected recurring from subscriptions + bills not yet paid
+      // (they're still "committed" spend)
+      setRecurringTotal(recurSum)
+      setDiscretionaryTotal(discSum)
+
+      // ── Savings rate ───────────────────────────────────────────────
       const incomes = (incomeRes.data ?? []) as { gross_cad: number; net_cad: number | null; frequency: string }[]
-      const monthlyNet = incomes.reduce(
+      const monthlyNetIncome = incomes.reduce(
         (sum, s) => sum + toMonthlyAmount(s.net_cad ?? s.gross_cad, s.frequency as 'monthly'), 0
       )
-      if (monthlyNet > 0) {
-        // Use last 3 complete months to compute avg expenses
+      if (monthlyNetIncome > 0) {
         const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1)
           .toISOString().split('T')[0]
         const completeMonths = Array.from(monthMap.values())
           .filter(m => m.month >= threeMonthsAgo.slice(0, 7) && m.month < currentMonth)
         if (completeMonths.length > 0) {
           const avgExpenses = completeMonths.reduce((s, m) => s + m.expenses, 0) / completeMonths.length
-          setSavingsRate(((monthlyNet - avgExpenses) / monthlyNet) * 100)
+          setSavingsRate(((monthlyNetIncome - avgExpenses) / monthlyNetIncome) * 100)
         }
+      }
+
+      // ── Net worth by account (Feature 7) ───────────────────────────
+      const accounts = (accountsRes.data ?? []) as { id: string; name: string; type: string }[]
+      const allTxns = allTimeTxRes.data ?? []
+      const balanceMap = new Map<string, number>()
+      for (const t of allTxns) {
+        if (!t.account_id) continue
+        balanceMap.set(t.account_id, (balanceMap.get(t.account_id) ?? 0) + Number(t.amount))
+      }
+
+      const balances: AccountBalance[] = accounts
+        .map(a => ({
+          name: a.name,
+          type: a.type,
+          balance: balanceMap.get(a.id) ?? 0,
+        }))
+        .filter(a => a.balance !== 0)
+        .sort((a, b) => b.balance - a.balance)
+
+      setAccountBalances(balances)
+      if (balances.length > 0) {
+        setTotalNetWorth(balances.reduce((s, a) => s + a.balance, 0))
       }
 
       setLoading(false)
@@ -251,20 +387,23 @@ export default function DashboardPage() {
   const totalExpenses = spending.reduce((s, c) => s + c.total, 0)
   const currentMonthData = monthly.find(m => m.month === currentMonth)
   const currentMonthIncome = currentMonthData?.income ?? 0
-  const prevMonth = monthly.find(m => m.month === (() => {
-    const d = new Date(now.getFullYear(), now.getMonth() - 1, 1)
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-  })())
+  const prevMonthData = monthly.find(m => m.month === prevMonthStr)
 
-  // Month-over-month change percentages
-  const expenseChange = prevMonth && prevMonth.expenses > 0
-    ? ((totalExpenses - prevMonth.expenses) / prevMonth.expenses) * 100 : null
-  const incomeChange = prevMonth && prevMonth.income > 0
-    ? ((currentMonthIncome - prevMonth.income) / prevMonth.income) * 100 : null
+  const expenseChange = prevMonthData && prevMonthData.expenses > 0
+    ? ((totalExpenses - prevMonthData.expenses) / prevMonthData.expenses) * 100 : null
+  const incomeChange = prevMonthData && prevMonthData.income > 0
+    ? ((currentMonthIncome - prevMonthData.income) / prevMonthData.income) * 100 : null
 
   const netMTD = currentMonthIncome - totalExpenses
   const totalBudgeted = budgets.reduce((s, b) => s + b.budgeted, 0)
   const totalBudgetSpent = budgets.reduce((s, b) => s + b.spent, 0)
+  const budgetProgress = totalBudgeted > 0 ? (totalBudgetSpent / totalBudgeted) * 100 : 0
+
+  const paidCount = fixedCosts.filter(c => c.paid).length
+  const totalFixedCosts = fixedCosts.reduce((s, c) => s + c.amount, 0)
+
+  const totalRecurringDisc = recurringTotal + discretionaryTotal
+  const recurringPct = totalRecurringDisc > 0 ? (recurringTotal / totalRecurringDisc) * 100 : 0
 
   if (loading) {
     return <div className="text-gray-400 text-sm">Loading dashboard...</div>
@@ -273,11 +412,14 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-semibold text-white">Dashboard</h1>
-        <p className="text-sm text-gray-400 mt-1">
-          {now.toLocaleDateString('en-CA', { month: 'long', year: 'numeric' })}
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-white">Dashboard</h1>
+          <p className="text-sm text-gray-400 mt-1">
+            {now.toLocaleDateString('en-CA', { month: 'long', year: 'numeric' })}
+            <span className="text-gray-600 ml-2">· Day {dayOfMonth} of {daysInMonth}</span>
+          </p>
+        </div>
       </div>
 
       {/* KPI Cards */}
@@ -313,13 +455,73 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Alerts */}
+      {/* Feature 1: Spending Pace Projector */}
+      {projectedSpend !== null && totalBudgeted > 0 && (
+        <div className={`flex items-center gap-3 px-4 py-3 rounded-lg border ${
+          budgetProgress > monthProgress * 1.1
+            ? 'bg-red-500/10 border-red-500/20'
+            : budgetProgress > monthProgress * 0.9
+              ? 'bg-amber-500/10 border-amber-500/20'
+              : 'bg-green-500/10 border-green-500/20'
+        }`}>
+          <Zap size={16} className={
+            budgetProgress > monthProgress * 1.1 ? 'text-red-400'
+              : budgetProgress > monthProgress * 0.9 ? 'text-amber-400' : 'text-green-400'
+          } />
+          <div className="flex-1">
+            <div className="text-sm text-gray-200">
+              <strong className="text-white">{monthProgress.toFixed(0)}%</strong> through the month,{' '}
+              <strong className={budgetProgress > monthProgress ? 'text-amber-400' : 'text-green-400'}>
+                {budgetProgress.toFixed(0)}%
+              </strong> of budget spent.{' '}
+              At this pace: <strong className="text-white">{formatCAD(projectedSpend)}</strong> by month-end
+              {projectedSpend > totalBudgeted && (
+                <span className="text-red-400"> ({formatCAD(projectedSpend - totalBudgeted)} over budget)</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Spending Alerts */}
       <SpendingAlerts />
 
-      {/* Action items bar */}
+      {/* Quick Actions (Feature 6) */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <button
+          onClick={() => navigate('/import')}
+          className="flex items-center gap-2.5 px-4 py-3 bg-gray-800/60 border border-gray-700/50 rounded-lg text-sm text-gray-300 hover:text-white hover:border-gray-600 transition-colors"
+        >
+          <Upload size={16} className="text-indigo-400" />
+          Import CSV
+        </button>
+        <button
+          onClick={() => navigate('/transactions')}
+          className="flex items-center gap-2.5 px-4 py-3 bg-gray-800/60 border border-gray-700/50 rounded-lg text-sm text-gray-300 hover:text-white hover:border-gray-600 transition-colors"
+        >
+          <Zap size={16} className="text-amber-400" />
+          Analyze Transactions
+        </button>
+        <button
+          onClick={() => navigate('/chat')}
+          className="flex items-center gap-2.5 px-4 py-3 bg-gray-800/60 border border-gray-700/50 rounded-lg text-sm text-gray-300 hover:text-white hover:border-gray-600 transition-colors"
+        >
+          <Bot size={16} className="text-green-400" />
+          Ask Claude
+        </button>
+        <button
+          onClick={() => navigate('/projections')}
+          className="flex items-center gap-2.5 px-4 py-3 bg-gray-800/60 border border-gray-700/50 rounded-lg text-sm text-gray-300 hover:text-white hover:border-gray-600 transition-colors"
+        >
+          <TrendingUp size={16} className="text-purple-400" />
+          Projections
+        </button>
+      </div>
+
+      {/* Uncategorized action bar */}
       {uncategorizedCount > 0 && (
         <button
-          onClick={() => navigate('/transactions?recurring=&type=&category=uncategorized')}
+          onClick={() => navigate('/transactions')}
           className="w-full flex items-center justify-between px-4 py-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-sm text-amber-300 hover:bg-amber-500/15 transition-colors"
         >
           <span>{uncategorizedCount} uncategorized transaction{uncategorizedCount !== 1 ? 's' : ''} need review</span>
@@ -330,7 +532,7 @@ export default function DashboardPage() {
       {/* Main content grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-        {/* Left column: Charts (2/3 width) */}
+        {/* ═══ Left column (2/3) ═══ */}
         <div className="lg:col-span-2 space-y-6">
 
           {/* Budget Overview */}
@@ -352,58 +554,114 @@ export default function DashboardPage() {
               </div>
               <div className="space-y-3">
                 {budgets.map(b => (
-                  <BudgetProgressBar
-                    key={b.category}
-                    budgeted={b.budgeted}
-                    spent={b.spent}
-                    label={b.category}
-                  />
+                  <BudgetProgressBar key={b.category} budgeted={b.budgeted} spent={b.spent} label={b.category} />
                 ))}
               </div>
             </div>
           )}
 
-          {/* Charts */}
+          {/* Charts row */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="card">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-base font-medium text-white">Spending by Category</h2>
-                <button
-                  onClick={() => navigate('/spending')}
-                  className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-                >
+                <button onClick={() => navigate('/spending')} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
                   Details
                 </button>
               </div>
-              {spending.length > 0
-                ? <SpendingPieChart data={spending} />
-                : <EmptyState message="No transactions this month" />
-              }
+              {spending.length > 0 ? <SpendingPieChart data={spending} /> : <EmptyState message="No transactions this month" />}
             </div>
             <div className="card">
               <h2 className="text-base font-medium mb-4 text-white">Income vs Expenses</h2>
-              {monthly.length > 0
-                ? <MonthlyBarChart data={monthly} />
-                : <EmptyState message="No transaction history yet" />
-              }
+              {monthly.length > 0 ? <MonthlyBarChart data={monthly} /> : <EmptyState message="No transaction history yet" />}
             </div>
           </div>
+
+          {/* Feature 3: Category vs Last Month */}
+          {categoryChanges.length > 0 && (
+            <div className="card">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-base font-medium text-white">Category Changes vs Last Month</h2>
+                <button onClick={() => navigate('/spending')} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
+                  Spending details
+                </button>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {categoryChanges.map(c => (
+                  <div key={c.name} className="px-3 py-2.5 bg-gray-800/40 rounded-lg">
+                    <div className="flex items-center gap-1.5 mb-1">
+                      {c.color && <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: c.color }} />}
+                      <span className="text-xs text-gray-400 truncate">{c.name}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-mono text-white">{formatCAD(c.current)}</span>
+                      <span className={`text-xs flex items-center gap-0.5 ${
+                        c.change > 10 ? 'text-red-400' : c.change < -10 ? 'text-green-400' : 'text-gray-500'
+                      }`}>
+                        {c.change > 0 ? <ArrowUpRight size={11} /> : c.change < 0 ? <ArrowDownRight size={11} /> : null}
+                        {c.change !== 0 ? `${Math.abs(c.change).toFixed(0)}%` : '--'}
+                      </span>
+                    </div>
+                    <div className="text-xs text-gray-600 mt-0.5">was {formatCAD(c.previous)}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Feature 4: Recurring vs Discretionary */}
+          {totalRecurringDisc > 0 && (
+            <div className="card">
+              <h2 className="text-base font-medium text-white mb-4">Recurring vs Discretionary</h2>
+              <div className="flex items-center gap-4">
+                {/* Stacked bar */}
+                <div className="flex-1">
+                  <div className="w-full h-6 bg-gray-800 rounded-full overflow-hidden flex">
+                    <div
+                      className="h-full bg-indigo-500 transition-all"
+                      style={{ width: `${recurringPct}%` }}
+                      title={`Recurring: ${formatCAD(recurringTotal)}`}
+                    />
+                    <div
+                      className="h-full bg-amber-500 transition-all"
+                      style={{ width: `${100 - recurringPct}%` }}
+                      title={`Discretionary: ${formatCAD(discretionaryTotal)}`}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2.5 h-2.5 rounded-full bg-indigo-500" />
+                      <span className="text-xs text-gray-400">Recurring</span>
+                      <span className="text-xs font-mono text-white">{formatCAD(recurringTotal)}</span>
+                      <span className="text-xs text-gray-600">({recurringPct.toFixed(0)}%)</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
+                      <span className="text-xs text-gray-400">Discretionary</span>
+                      <span className="text-xs font-mono text-white">{formatCAD(discretionaryTotal)}</span>
+                      <span className="text-xs text-gray-600">({(100 - recurringPct).toFixed(0)}%)</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 mt-3">
+                Based on transactions flagged as recurring. You can control {formatCAD(discretionaryTotal)} of this month's spending.
+              </p>
+            </div>
+          )}
 
           {/* Goal Insights */}
           <GoalInsights />
         </div>
 
-        {/* Right column: Lists (1/3 width) */}
+        {/* ═══ Right column (1/3) ═══ */}
         <div className="space-y-6">
 
           {/* Recent Transactions */}
           <div className="card">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-base font-medium text-white">Recent Transactions</h2>
-              <button
-                onClick={() => navigate('/transactions')}
-                className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-              >
+              <button onClick={() => navigate('/transactions')} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
                 View all
               </button>
             </div>
@@ -412,9 +670,7 @@ export default function DashboardPage() {
                 {recentTx.map(tx => (
                   <div key={tx.id} className="flex items-center justify-between py-2 border-b border-gray-800/50 last:border-0">
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm text-white truncate">
-                        {tx.merchant_name || tx.payee}
-                      </div>
+                      <div className="text-sm text-white truncate">{tx.merchant_name || tx.payee}</div>
                       <div className="flex items-center gap-2 text-xs text-gray-500 mt-0.5">
                         <span>{formatDate(tx.date)}</span>
                         {tx.category && (
@@ -438,12 +694,32 @@ export default function DashboardPage() {
             )}
           </div>
 
+          {/* Feature 2: Largest Transactions */}
+          {largestTx.length > 0 && (
+            <div className="card">
+              <h2 className="text-base font-medium text-white mb-3">Biggest Purchases</h2>
+              <div className="space-y-1">
+                {largestTx.map(tx => (
+                  <div key={tx.id} className="flex items-center justify-between py-2 border-b border-gray-800/50 last:border-0">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm text-white truncate">{tx.merchant_name || tx.payee}</div>
+                      <div className="text-xs text-gray-500 mt-0.5">{formatDate(tx.date)}</div>
+                    </div>
+                    <span className="text-sm font-mono text-red-400 ml-2 flex-shrink-0">
+                      {formatCAD(Math.abs(tx.amount))}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Top Merchants */}
           {topMerchants.length > 0 && (
             <div className="card">
               <h2 className="text-base font-medium text-white mb-3">Top Merchants</h2>
               <div className="space-y-2">
-                {topMerchants.map((m, i) => {
+                {topMerchants.map(m => {
                   const maxTotal = topMerchants[0].total
                   const pct = maxTotal > 0 ? (m.total / maxTotal) * 100 : 0
                   return (
@@ -453,10 +729,7 @@ export default function DashboardPage() {
                         <span className="text-white font-mono text-xs ml-2 flex-shrink-0">{formatCAD(m.total)}</span>
                       </div>
                       <div className="w-full bg-gray-800 rounded-full h-1.5">
-                        <div
-                          className="h-1.5 rounded-full bg-indigo-500/60"
-                          style={{ width: `${pct}%` }}
-                        />
+                        <div className="h-1.5 rounded-full bg-indigo-500/60" style={{ width: `${pct}%` }} />
                       </div>
                     </div>
                   )
@@ -465,43 +738,42 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* Monthly Bills & Subscriptions */}
-          {upcomingBills.length > 0 && (
+          {/* Feature 5: Bill Payment Tracker */}
+          {fixedCosts.length > 0 && (
             <div className="card">
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-base font-medium text-white">Fixed Costs</h2>
+                <h2 className="text-base font-medium text-white">Bill Tracker</h2>
                 <span className="text-xs text-gray-400">
-                  {formatCAD(upcomingBills.reduce((s, b) => s + b.amount, 0))}/mo
+                  {paidCount}/{fixedCosts.length} paid · {formatCAD(totalFixedCosts)}/mo
                 </span>
               </div>
               <div className="space-y-1">
-                {upcomingBills.map(bill => (
+                {fixedCosts.slice(0, 10).map(bill => (
                   <div key={bill.name} className="flex items-center justify-between py-1.5 border-b border-gray-800/50 last:border-0">
                     <div className="flex items-center gap-2 min-w-0">
-                      {bill.type === 'subscription'
-                        ? <CreditCard size={13} className="text-gray-600 flex-shrink-0" />
-                        : <Receipt size={13} className="text-gray-600 flex-shrink-0" />
+                      {bill.paid
+                        ? <CheckCircle2 size={13} className="text-green-400 flex-shrink-0" />
+                        : <Clock size={13} className="text-gray-600 flex-shrink-0" />
                       }
-                      <span className="text-sm text-gray-300 truncate">{bill.name}</span>
+                      <span className={`text-sm truncate ${bill.paid ? 'text-gray-400' : 'text-gray-200'}`}>
+                        {bill.name}
+                      </span>
+                      <span className="text-xs text-gray-600 flex-shrink-0">
+                        {bill.type === 'subscription' ? 'sub' : 'bill'}
+                      </span>
                     </div>
-                    <span className="text-sm font-mono text-white ml-2 flex-shrink-0">
+                    <span className={`text-sm font-mono ml-2 flex-shrink-0 ${bill.paid ? 'text-gray-500' : 'text-white'}`}>
                       {formatCAD(bill.amount)}
                     </span>
                   </div>
                 ))}
               </div>
               <div className="flex gap-2 mt-3">
-                <button
-                  onClick={() => navigate('/subscriptions')}
-                  className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-                >
+                <button onClick={() => navigate('/subscriptions')} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
                   Subscriptions
                 </button>
                 <span className="text-gray-700">·</span>
-                <button
-                  onClick={() => navigate('/recurring')}
-                  className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-                >
+                <button onClick={() => navigate('/recurring')} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
                   Fixed Bills
                 </button>
               </div>
@@ -513,17 +785,13 @@ export default function DashboardPage() {
             <div className="card">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-base font-medium text-white">Goals</h2>
-                <button
-                  onClick={() => navigate('/goals')}
-                  className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-                >
+                <button onClick={() => navigate('/goals')} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
                   Manage
                 </button>
               </div>
               <div className="space-y-3">
                 {goals.slice(0, 4).map(g => {
-                  const pct = g.target_amount > 0
-                    ? Math.min((g.current_amount / g.target_amount) * 100, 100) : 0
+                  const pct = g.target_amount > 0 ? Math.min((g.current_amount / g.target_amount) * 100, 100) : 0
                   return (
                     <div key={g.id}>
                       <div className="flex items-center justify-between text-sm mb-1">
@@ -533,10 +801,7 @@ export default function DashboardPage() {
                       <div className="w-full bg-gray-800 rounded-full h-2">
                         <div
                           className="h-2 rounded-full transition-all"
-                          style={{
-                            width: `${pct}%`,
-                            backgroundColor: g.color ?? '#6366f1',
-                          }}
+                          style={{ width: `${pct}%`, backgroundColor: g.color ?? '#6366f1' }}
                         />
                       </div>
                       <div className="flex items-center justify-between text-xs text-gray-500 mt-0.5">
@@ -549,28 +814,54 @@ export default function DashboardPage() {
               </div>
             </div>
           )}
+
+          {/* Feature 7: Net Worth by Account */}
+          {accountBalances.length > 0 && (
+            <div className="card">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-base font-medium text-white">Account Balances</h2>
+                <button onClick={() => navigate('/accounts')} className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
+                  Manage
+                </button>
+              </div>
+              {totalNetWorth !== null && (
+                <div className="flex items-center justify-between mb-3 pb-3 border-b border-gray-800">
+                  <span className="text-sm text-gray-400">Net Position</span>
+                  <span className={`text-lg font-mono font-medium ${totalNetWorth >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {formatCAD(totalNetWorth)}
+                  </span>
+                </div>
+              )}
+              <div className="space-y-1">
+                {accountBalances.map(a => (
+                  <div key={a.name} className="flex items-center justify-between py-1.5 border-b border-gray-800/50 last:border-0">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Building2 size={13} className="text-gray-600 flex-shrink-0" />
+                      <span className="text-sm text-gray-300 truncate">{a.name}</span>
+                      <span className="text-xs text-gray-600 flex-shrink-0">{a.type.replace('_', ' ')}</span>
+                    </div>
+                    <span className={`text-sm font-mono ml-2 flex-shrink-0 ${a.balance >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {formatCAD(a.balance)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-gray-600 mt-2">Computed from transaction history</p>
+            </div>
+          )}
         </div>
       </div>
     </div>
   )
 }
 
+/* ─── Sub-components ──────────────────────────────────────────────────────── */
+
 function KpiCard({
-  icon,
-  label,
-  value,
-  sub,
-  change,
-  invertChange,
-  valueClass = 'text-white',
+  icon, label, value, sub, change, invertChange, valueClass = 'text-white',
 }: {
-  icon: ReactNode
-  label: string
-  value: string
-  sub?: string
-  change?: number | null
-  invertChange?: boolean
-  valueClass?: string
+  icon: ReactNode; label: string; value: string; sub?: string
+  change?: number | null; invertChange?: boolean; valueClass?: string
 }) {
   const isPositive = change != null && change > 0
   const changeColor = (() => {
@@ -581,18 +872,12 @@ function KpiCard({
 
   return (
     <div className="card-sm space-y-2">
-      <div className="flex items-center gap-2 text-gray-400 text-sm">
-        {icon}
-        {label}
-      </div>
+      <div className="flex items-center gap-2 text-gray-400 text-sm">{icon}{label}</div>
       <div className="flex items-end gap-2">
         <div className={`stat-value ${valueClass}`}>{value}</div>
         {change != null && (
           <div className={`flex items-center gap-0.5 text-xs ${changeColor} mb-0.5`}>
-            {isPositive
-              ? <ArrowUpRight size={12} />
-              : <ArrowDownRight size={12} />
-            }
+            {isPositive ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
             {Math.abs(change).toFixed(0)}%
           </div>
         )}
@@ -604,8 +889,6 @@ function KpiCard({
 
 function EmptyState({ message }: { message: string }) {
   return (
-    <div className="flex items-center justify-center h-48 text-gray-500 text-sm">
-      {message}
-    </div>
+    <div className="flex items-center justify-center h-48 text-gray-500 text-sm">{message}</div>
   )
 }

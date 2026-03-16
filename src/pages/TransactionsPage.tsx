@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Search, ChevronLeft, ChevronRight, Filter, X, Check, Pencil, Wand2, ArrowUp, ArrowDown, Repeat, CalendarClock } from 'lucide-react'
+import { Search, ChevronLeft, ChevronRight, Filter, X, Check, Pencil, Wand2, ArrowUp, ArrowDown, Repeat, CalendarClock, Plus } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { formatCAD, formatDate } from '@/lib/utils'
@@ -43,6 +43,19 @@ interface EditForm {
   notes: string
 }
 
+interface BulkForm {
+  category_id: string
+  is_recurring: '' | 'true' | 'false'
+}
+
+interface NewCatForm {
+  name: string
+  parent_id: string
+  color: string
+}
+
+const COLOR_PRESETS = ['#6366f1', '#8b5cf6', '#ec4899', '#f43f5e', '#f97316', '#eab308', '#22c55e', '#14b8a6', '#06b6d4', '#3b82f6']
+
 export default function TransactionsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -77,6 +90,17 @@ export default function TransactionsPage() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editForm, setEditForm] = useState<EditForm>({ category_id: '', merchant_name: '', payee: '', is_recurring: false, notes: '' })
 
+  // Multi-select state
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [selectAll, setSelectAll] = useState(false)
+  const [bulkForm, setBulkForm] = useState<BulkForm>({ category_id: '', is_recurring: '' })
+  const [bulkSaving, setBulkSaving] = useState(false)
+
+  // Inline new category creation
+  const [newCatForm, setNewCatForm] = useState<NewCatForm | null>(null)
+  const [newCatContext, setNewCatContext] = useState<'single' | 'bulk' | null>(null)
+  const [newCatSaving, setNewCatSaving] = useState(false)
+
   // Rule suggestion after category correction
   const [rulePrompt, setRulePrompt] = useState<{
     payee: string
@@ -104,18 +128,17 @@ export default function TransactionsPage() {
   const hasActiveFilters = filters.categoryId || filters.accountId || filters.dateFrom ||
     filters.dateTo || filters.amountMin || filters.amountMax || filters.type || filters.recurring
 
-  // Load categories and accounts once
-  useEffect(() => {
-    async function loadMeta() {
-      const [catRes, accRes] = await Promise.all([
-        supabase.from('categories').select('id, name, parent_id, color').order('name'),
-        supabase.from('accounts').select('id, name').order('name'),
-      ])
-      setCategories((catRes.data ?? []) as Category[])
-      setAccounts(accRes.data ?? [])
-    }
-    loadMeta()
+  // Load categories and accounts
+  const loadMeta = useCallback(async () => {
+    const [catRes, accRes] = await Promise.all([
+      supabase.from('categories').select('id, name, parent_id, color').order('name'),
+      supabase.from('accounts').select('id, name').order('name'),
+    ])
+    setCategories((catRes.data ?? []) as Category[])
+    setAccounts(accRes.data ?? [])
   }, [])
+
+  useEffect(() => { loadMeta() }, [loadMeta])
 
   // Build category label map
   const parentMap = new Map(categories.filter(c => !c.parent_id).map(c => [c.id, c.name]))
@@ -124,6 +147,8 @@ export default function TransactionsPage() {
     label: c.parent_id ? `${parentMap.get(c.parent_id) ?? ''} > ${c.name}` : c.name,
     color: c.color,
   })).sort((a, b) => a.label.localeCompare(b.label))
+
+  const topLevelCategories = categories.filter(c => !c.parent_id)
 
   const fetchTransactions = useCallback(async () => {
     setLoading(true)
@@ -200,6 +225,12 @@ export default function TransactionsPage() {
     setSearchParams(params, { replace: true })
   }, [filters, setSearchParams])
 
+  // Clear selection on page change
+  useEffect(() => {
+    setSelected(new Set())
+    setSelectAll(false)
+  }, [page])
+
   function updateFilter(key: keyof Filters, value: string) {
     setFilters(prev => ({ ...prev, [key]: value }))
     setPage(0)
@@ -210,8 +241,45 @@ export default function TransactionsPage() {
     setPage(0)
   }
 
+  // ── Multi-select ─────────────────────────────────────────────────
+  function toggleSelectAll() {
+    if (selectAll) {
+      setSelected(new Set())
+      setSelectAll(false)
+    } else {
+      setSelected(new Set(transactions.map(t => t.id)))
+      setSelectAll(true)
+    }
+    // Cancel single edit when selecting
+    setEditingId(null)
+  }
+
+  function toggleSelect(id: string) {
+    // Cancel single edit when selecting
+    setEditingId(null)
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      setSelectAll(next.size === transactions.length && transactions.length > 0)
+      return next
+    })
+  }
+
+  function clearSelection() {
+    setSelected(new Set())
+    setSelectAll(false)
+    setBulkForm({ category_id: '', is_recurring: '' })
+  }
+
   // ── Editing ──────────────────────────────────────────────────────
   function startEdit(tx: Transaction) {
+    // Cancel selection when starting single edit
+    setSelected(new Set())
+    setSelectAll(false)
     setEditingId(tx.id)
     setEditForm({
       category_id: tx.category_id ?? '',
@@ -270,6 +338,76 @@ export default function TransactionsPage() {
     await fetchTransactions()
   }
 
+  // ── Bulk edit ────────────────────────────────────────────────────
+  async function saveBulk() {
+    if (selected.size === 0) return
+    setBulkSaving(true)
+
+    const record: Record<string, unknown> = {}
+    if (bulkForm.category_id) {
+      record.category_id = bulkForm.category_id
+    }
+    if (bulkForm.is_recurring === 'true') {
+      record.is_recurring = true
+    } else if (bulkForm.is_recurring === 'false') {
+      record.is_recurring = false
+    }
+
+    if (Object.keys(record).length === 0) {
+      setBulkSaving(false)
+      return
+    }
+
+    await supabase.from('transactions').update(record).in('id', [...selected])
+
+    // If category changed, offer rule creation for shared payees
+    if (bulkForm.category_id) {
+      const selectedTxs = transactions.filter(t => selected.has(t.id))
+      // Use the most common payee among selected for the rule prompt
+      const payeeCounts = new Map<string, number>()
+      for (const tx of selectedTxs) {
+        const p = tx.payee.toLowerCase().trim()
+        payeeCounts.set(p, (payeeCounts.get(p) ?? 0) + 1)
+      }
+      let topPayee = ''
+      let topCount = 0
+      for (const [p, c] of payeeCounts) {
+        if (c > topCount) { topPayee = p; topCount = c }
+      }
+
+      if (topPayee) {
+        const { data: existing } = await supabase
+          .from('categorization_rules')
+          .select('id')
+          .ilike('pattern', topPayee)
+          .limit(1)
+
+        if (!existing || existing.length === 0) {
+          const { count } = await supabase
+            .from('transactions')
+            .select('id', { count: 'exact', head: true })
+            .ilike('payee', `%${topPayee}%`)
+
+          const catLabel = categoryOptions.find(c => c.id === bulkForm.category_id)?.label ?? 'selected category'
+          const originalTx = selectedTxs.find(t => t.payee.toLowerCase().trim() === topPayee)
+
+          setRulePrompt({
+            payee: originalTx?.payee ?? topPayee,
+            merchantName: originalTx?.merchant_name ?? '',
+            categoryId: bulkForm.category_id,
+            categoryLabel: catLabel,
+            isRecurring: bulkForm.is_recurring === 'true',
+            matchCount: count ?? 1,
+          })
+        }
+      }
+    }
+
+    clearSelection()
+    setBulkSaving(false)
+    await fetchTransactions()
+  }
+
   async function createRuleFromPrompt() {
     if (!rulePrompt) return
     setRuleSaving(true)
@@ -304,6 +442,56 @@ export default function TransactionsPage() {
 
   function cancelEdit() {
     setEditingId(null)
+  }
+
+  // ── Inline new category creation ─────────────────────────────────
+  function handleCategorySelectChange(value: string, context: 'single' | 'bulk') {
+    if (value === '__new__') {
+      setNewCatForm({ name: '', parent_id: '', color: COLOR_PRESETS[0] })
+      setNewCatContext(context)
+      // Reset the select back so it doesn't stay on "__new__"
+      if (context === 'single') {
+        setEditForm(f => ({ ...f, category_id: '' }))
+      } else {
+        setBulkForm(f => ({ ...f, category_id: '' }))
+      }
+    } else {
+      if (context === 'single') {
+        setEditForm(f => ({ ...f, category_id: value }))
+      } else {
+        setBulkForm(f => ({ ...f, category_id: value }))
+      }
+    }
+  }
+
+  async function createCategory() {
+    if (!newCatForm || !newCatForm.name.trim()) return
+    setNewCatSaving(true)
+
+    const { data, error } = await supabase.from('categories').insert({
+      name: newCatForm.name.trim(),
+      parent_id: newCatForm.parent_id || null,
+      color: newCatForm.color || null,
+    }).select('id').single()
+
+    if (!error && data) {
+      await loadMeta()
+      // Auto-select the newly created category
+      if (newCatContext === 'single') {
+        setEditForm(f => ({ ...f, category_id: data.id }))
+      } else {
+        setBulkForm(f => ({ ...f, category_id: data.id }))
+      }
+    }
+
+    setNewCatSaving(false)
+    setNewCatForm(null)
+    setNewCatContext(null)
+  }
+
+  function cancelNewCategory() {
+    setNewCatForm(null)
+    setNewCatContext(null)
   }
 
   // ── Add as subscription or fixed bill ──────────────────────────────
@@ -389,6 +577,87 @@ export default function TransactionsPage() {
   // Compute filtered totals
   const filteredExpenses = transactions.filter(t => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0)
   const filteredIncome = transactions.filter(t => t.amount >= 0).reduce((s, t) => s + t.amount, 0)
+
+  const COL_COUNT = 8 // checkbox + date + payee + merchant + category + account + amount + edit
+
+  // Inline new category form component
+  const newCategoryFormUI = newCatForm && (
+    <div className="bg-gray-800/60 border border-gray-700 rounded-lg p-3 space-y-3 mt-2">
+      <p className="text-xs text-gray-400 font-medium flex items-center gap-1">
+        <Plus size={12} /> New Category
+      </p>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div>
+          <label className="text-xs text-gray-500 block mb-1">Name *</label>
+          <input
+            type="text"
+            value={newCatForm.name}
+            onChange={e => setNewCatForm({ ...newCatForm, name: e.target.value })}
+            placeholder="e.g. Groceries"
+            autoFocus
+            className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500 block mb-1">Parent (optional)</label>
+          <select
+            value={newCatForm.parent_id}
+            onChange={e => setNewCatForm({ ...newCatForm, parent_id: e.target.value })}
+            className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          >
+            <option value="">None (top-level)</option>
+            {topLevelCategories.map(c => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-gray-500 block mb-1">Color</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={newCatForm.color}
+              onChange={e => setNewCatForm({ ...newCatForm, color: e.target.value })}
+              placeholder="#6366f1"
+              className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+            <span
+              className="w-6 h-6 rounded flex-shrink-0 border border-gray-600"
+              style={{ backgroundColor: newCatForm.color || '#6b7280' }}
+            />
+          </div>
+        </div>
+        <div>
+          <label className="text-xs text-gray-500 block mb-1">Presets</label>
+          <div className="flex flex-wrap gap-1">
+            {COLOR_PRESETS.map(c => (
+              <button
+                key={c}
+                onClick={() => setNewCatForm({ ...newCatForm, color: c })}
+                className={`w-5 h-5 rounded-full border-2 transition-colors ${newCatForm.color === c ? 'border-white' : 'border-transparent hover:border-gray-500'}`}
+                style={{ backgroundColor: c }}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={createCategory}
+          disabled={!newCatForm.name.trim() || newCatSaving}
+          className="flex items-center gap-1 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded transition-colors disabled:opacity-50"
+        >
+          {newCatSaving ? 'Creating...' : 'Create'}
+        </button>
+        <button
+          onClick={cancelNewCategory}
+          className="flex items-center gap-1 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-300"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
 
   return (
     <div className="space-y-6">
@@ -654,11 +923,72 @@ export default function TransactionsPage() {
         </div>
       )}
 
+      {/* Bulk action toolbar */}
+      {selected.size > 0 && (
+        <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-4 py-3 space-y-3">
+          <div className="flex items-center gap-4 flex-wrap">
+            <span className="text-sm text-indigo-300 font-medium">
+              {selected.size} selected
+            </span>
+            <div className="flex items-center gap-3 flex-wrap flex-1">
+              <div>
+                <select
+                  value={bulkForm.category_id}
+                  onChange={e => handleCategorySelectChange(e.target.value, 'bulk')}
+                  className="px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="">— Category: Don't change —</option>
+                  <option value="__new__">+ New category...</option>
+                  {categoryOptions.map(c => (
+                    <option key={c.id} value={c.id}>{c.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <select
+                  value={bulkForm.is_recurring}
+                  onChange={e => setBulkForm(f => ({ ...f, is_recurring: e.target.value as BulkForm['is_recurring'] }))}
+                  className="px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                >
+                  <option value="">— Recurring: Don't change —</option>
+                  <option value="true">Recurring: Yes</option>
+                  <option value="false">Recurring: No</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={saveBulk}
+                disabled={bulkSaving || (!bulkForm.category_id && !bulkForm.is_recurring)}
+                className="flex items-center gap-1 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded transition-colors disabled:opacity-50"
+              >
+                {bulkSaving ? 'Applying...' : 'Apply'}
+              </button>
+              <button
+                onClick={clearSelection}
+                className="flex items-center gap-1 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-300"
+              >
+                Deselect all
+              </button>
+            </div>
+          </div>
+          {newCatContext === 'bulk' && newCategoryFormUI}
+        </div>
+      )}
+
       {/* Table */}
       <div className="card p-0 overflow-x-auto">
         <table className="w-full text-sm min-w-[700px]">
           <thead>
             <tr className="border-b border-gray-800 text-gray-400 text-xs">
+              <th className="px-2 py-3 w-10">
+                <input
+                  type="checkbox"
+                  checked={selectAll}
+                  onChange={toggleSelectAll}
+                  className="rounded bg-gray-800 border-gray-700 text-indigo-500 focus:ring-indigo-500"
+                />
+              </th>
               {([
                 { key: 'date' as SortColumn, label: 'Date', align: 'left' },
                 { key: 'payee' as SortColumn, label: 'Payee', align: 'left' },
@@ -696,11 +1026,11 @@ export default function TransactionsPage() {
           <tbody className="divide-y divide-gray-800/50">
             {loading ? (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-gray-500">Loading…</td>
+                <td colSpan={COL_COUNT} className="px-4 py-8 text-center text-gray-500">Loading…</td>
               </tr>
             ) : transactions.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
+                <td colSpan={COL_COUNT} className="px-4 py-8 text-center text-gray-500">
                   {filters.search || hasActiveFilters ? 'No matches found' : 'No transactions yet — import a CSV to get started'}
                 </td>
               </tr>
@@ -713,7 +1043,7 @@ export default function TransactionsPage() {
                 if (isEditing) {
                   return (
                     <tr key={tx.id} className="bg-gray-800/40">
-                      <td colSpan={7} className="px-4 py-3">
+                      <td colSpan={COL_COUNT} className="px-4 py-3">
                         <div className="space-y-3">
                           <div className="flex items-center gap-2 text-xs text-gray-500">
                             <span className="font-mono">{formatDate(tx.date)}</span>
@@ -744,14 +1074,16 @@ export default function TransactionsPage() {
                               <label className="text-xs text-gray-500 block mb-1">Category</label>
                               <select
                                 value={editForm.category_id}
-                                onChange={e => setEditForm({ ...editForm, category_id: e.target.value })}
+                                onChange={e => handleCategorySelectChange(e.target.value, 'single')}
                                 className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
                               >
                                 <option value="">None</option>
+                                <option value="__new__">+ New category...</option>
                                 {categoryOptions.map(c => (
                                   <option key={c.id} value={c.id}>{c.label}</option>
                                 ))}
                               </select>
+                              {newCatContext === 'single' && newCategoryFormUI}
                             </div>
                             <div>
                               <label className="text-xs text-gray-500 block mb-1">Notes</label>
@@ -812,7 +1144,15 @@ export default function TransactionsPage() {
                 }
 
                 return (
-                  <tr key={tx.id} className="hover:bg-gray-800/30 transition-colors">
+                  <tr key={tx.id} className={`hover:bg-gray-800/30 transition-colors ${selected.has(tx.id) ? 'bg-indigo-500/5' : ''}`}>
+                    <td className="px-2 py-2.5 w-10">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(tx.id)}
+                        onChange={() => toggleSelect(tx.id)}
+                        className="rounded bg-gray-800 border-gray-700 text-indigo-500 focus:ring-indigo-500"
+                      />
+                    </td>
                     <td className="px-4 py-2.5 text-gray-400 font-mono text-xs whitespace-nowrap">
                       {formatDate(tx.date)}
                     </td>
