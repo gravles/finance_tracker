@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { Search, ChevronLeft, ChevronRight, Filter, X, Check, Pencil, Wand2, ArrowUp, ArrowDown, Repeat, CalendarClock, Plus } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
@@ -95,6 +95,9 @@ export default function TransactionsPage() {
   const [selectAll, setSelectAll] = useState(false)
   const [bulkForm, setBulkForm] = useState<BulkForm>({ category_id: '', is_recurring: '' })
   const [bulkSaving, setBulkSaving] = useState(false)
+
+  // Header checkbox ref for indeterminate state
+  const headerCheckboxRef = useRef<HTMLInputElement>(null)
 
   // Inline new category creation
   const [newCatForm, setNewCatForm] = useState<NewCatForm | null>(null)
@@ -231,6 +234,14 @@ export default function TransactionsPage() {
     setSelectAll(false)
   }, [page])
 
+  // Sync header checkbox indeterminate state
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      const someSelected = selected.size > 0 && selected.size < transactions.length
+      headerCheckboxRef.current.indeterminate = someSelected
+    }
+  }, [selected.size, transactions.length])
+
   function updateFilter(key: keyof Filters, value: string) {
     setFilters(prev => ({ ...prev, [key]: value }))
     setPage(0)
@@ -239,6 +250,11 @@ export default function TransactionsPage() {
   function clearFilters() {
     setFilters(emptyFilters)
     setPage(0)
+  }
+
+  function dismissNewCatForm() {
+    setNewCatForm(null)
+    setNewCatContext(null)
   }
 
   // ── Multi-select ─────────────────────────────────────────────────
@@ -252,11 +268,13 @@ export default function TransactionsPage() {
     }
     // Cancel single edit when selecting
     setEditingId(null)
+    dismissNewCatForm()
   }
 
   function toggleSelect(id: string) {
     // Cancel single edit when selecting
     setEditingId(null)
+    dismissNewCatForm()
     setSelected(prev => {
       const next = new Set(prev)
       if (next.has(id)) {
@@ -273,6 +291,7 @@ export default function TransactionsPage() {
     setSelected(new Set())
     setSelectAll(false)
     setBulkForm({ category_id: '', is_recurring: '' })
+    dismissNewCatForm()
   }
 
   // ── Editing ──────────────────────────────────────────────────────
@@ -280,6 +299,7 @@ export default function TransactionsPage() {
     // Cancel selection when starting single edit
     setSelected(new Set())
     setSelectAll(false)
+    dismissNewCatForm()
     setEditingId(tx.id)
     setEditForm({
       category_id: tx.category_id ?? '',
@@ -335,6 +355,7 @@ export default function TransactionsPage() {
     }
 
     setEditingId(null)
+    dismissNewCatForm()
     await fetchTransactions()
   }
 
@@ -442,6 +463,7 @@ export default function TransactionsPage() {
 
   function cancelEdit() {
     setEditingId(null)
+    dismissNewCatForm()
   }
 
   // ── Inline new category creation ─────────────────────────────────
@@ -582,17 +604,18 @@ export default function TransactionsPage() {
 
   // Inline new category form component
   const newCategoryFormUI = newCatForm && (
-    <div className="bg-gray-800/60 border border-gray-700 rounded-lg p-3 space-y-3 mt-2">
+    <div className="bg-gray-800/60 border border-gray-700 rounded-lg p-3 space-y-3">
       <p className="text-xs text-gray-400 font-medium flex items-center gap-1">
         <Plus size={12} /> New Category
       </p>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
         <div>
           <label className="text-xs text-gray-500 block mb-1">Name *</label>
           <input
             type="text"
             value={newCatForm.name}
             onChange={e => setNewCatForm({ ...newCatForm, name: e.target.value })}
+            onKeyDown={e => { if (e.key === 'Enter' && newCatForm.name.trim()) createCategory() }}
             placeholder="e.g. Groceries"
             autoFocus
             className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
@@ -618,6 +641,7 @@ export default function TransactionsPage() {
               type="text"
               value={newCatForm.color}
               onChange={e => setNewCatForm({ ...newCatForm, color: e.target.value })}
+              onKeyDown={e => { if (e.key === 'Enter' && newCatForm.name.trim()) createCategory() }}
               placeholder="#6366f1"
               className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
@@ -629,12 +653,13 @@ export default function TransactionsPage() {
         </div>
         <div>
           <label className="text-xs text-gray-500 block mb-1">Presets</label>
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap gap-1.5">
             {COLOR_PRESETS.map(c => (
               <button
                 key={c}
+                type="button"
                 onClick={() => setNewCatForm({ ...newCatForm, color: c })}
-                className={`w-5 h-5 rounded-full border-2 transition-colors ${newCatForm.color === c ? 'border-white' : 'border-transparent hover:border-gray-500'}`}
+                className={`w-5 h-5 rounded-full border-2 transition-colors ${newCatForm.color === c ? 'border-white scale-110' : 'border-transparent hover:border-gray-500'}`}
                 style={{ backgroundColor: c }}
               />
             ))}
@@ -660,7 +685,7 @@ export default function TransactionsPage() {
   )
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-semibold text-white">Transactions</h1>
@@ -673,7 +698,7 @@ export default function TransactionsPage() {
 
       {/* Search + Filter toggle */}
       <div className="flex gap-2">
-        <div className="relative flex-1">
+        <div className="relative flex-1 min-w-0">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" size={16} />
           <input
             type="text"
@@ -685,14 +710,14 @@ export default function TransactionsPage() {
         </div>
         <button
           onClick={() => setShowFilters(!showFilters)}
-          className={`flex items-center gap-2 px-3 py-2 border rounded-lg text-sm font-medium transition-colors ${
+          className={`flex items-center gap-2 px-3 py-2 border rounded-lg text-sm font-medium transition-colors flex-shrink-0 ${
             hasActiveFilters
               ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-300'
               : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-white'
           }`}
         >
           <Filter size={14} />
-          Filters
+          <span className="hidden sm:inline">Filters</span>
           {hasActiveFilters && (
             <span className="w-2 h-2 rounded-full bg-indigo-400" />
           )}
@@ -700,9 +725,9 @@ export default function TransactionsPage() {
         {hasActiveFilters && (
           <button
             onClick={clearFilters}
-            className="flex items-center gap-1 px-3 py-2 text-sm text-gray-500 hover:text-gray-300"
+            className="flex items-center gap-1 px-3 py-2 text-sm text-gray-500 hover:text-gray-300 flex-shrink-0"
           >
-            <X size={14} /> Clear
+            <X size={14} /> <span className="hidden sm:inline">Clear</span>
           </button>
         )}
       </div>
@@ -854,9 +879,9 @@ export default function TransactionsPage() {
 
       {/* Rule creation prompt */}
       {rulePrompt && (
-        <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-4 py-3 flex items-start gap-3">
+        <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-4 py-3 flex flex-col sm:flex-row items-start gap-3">
           <Wand2 size={16} className="text-indigo-400 mt-0.5 flex-shrink-0" />
-          <div className="flex-1 space-y-1">
+          <div className="flex-1 space-y-1 min-w-0">
             <p className="text-sm text-white">
               Create a rule so all "<span className="text-indigo-300">{rulePrompt.payee}</span>" transactions
               are categorized as <span className="text-indigo-300">{rulePrompt.categoryLabel}</span>?
@@ -867,7 +892,7 @@ export default function TransactionsPage() {
                 : 'Future imports and re-analysis will use this rule automatically.'}
             </p>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-auto">
             <button
               onClick={createRuleFromPrompt}
               disabled={ruleSaving}
@@ -887,12 +912,12 @@ export default function TransactionsPage() {
 
       {/* Add as subscription/bill confirmation */}
       {addingAs && (
-        <div className={`${addingAs.type === 'subscription' ? 'bg-indigo-500/10 border-indigo-500/30' : 'bg-amber-500/10 border-amber-500/30'} border rounded-lg px-4 py-3 flex items-start gap-3`}>
+        <div className={`${addingAs.type === 'subscription' ? 'bg-indigo-500/10 border-indigo-500/30' : 'bg-amber-500/10 border-amber-500/30'} border rounded-lg px-4 py-3 flex flex-col sm:flex-row items-start gap-3`}>
           {addingAs.type === 'subscription'
             ? <Repeat size={16} className="text-indigo-400 mt-0.5 flex-shrink-0" />
             : <CalendarClock size={16} className="text-amber-400 mt-0.5 flex-shrink-0" />
           }
-          <div className="flex-1 space-y-1">
+          <div className="flex-1 space-y-1 min-w-0">
             <p className="text-sm text-white">
               Add "<span className={addingAs.type === 'subscription' ? 'text-indigo-300' : 'text-amber-300'}>{addingAs.tx.merchant_name || addingAs.tx.payee}</span>"
               as a {addingAs.type === 'subscription' ? 'subscription' : 'fixed bill'}?
@@ -901,7 +926,7 @@ export default function TransactionsPage() {
               This will find all matching transactions, detect the frequency and average amount, and mark them all as recurring.
             </p>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-auto">
             <button
               onClick={() => addAsRecurring(addingAs.type, addingAs.tx)}
               disabled={addingSaving}
@@ -925,38 +950,34 @@ export default function TransactionsPage() {
 
       {/* Bulk action toolbar */}
       {selected.size > 0 && (
-        <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-4 py-3 space-y-3">
-          <div className="flex items-center gap-4 flex-wrap">
-            <span className="text-sm text-indigo-300 font-medium">
+        <div className="bg-indigo-500/10 border border-indigo-500/30 rounded-lg px-3 sm:px-4 py-3 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+            <span className="text-sm text-indigo-300 font-medium flex-shrink-0">
               {selected.size} selected
             </span>
-            <div className="flex items-center gap-3 flex-wrap flex-1">
-              <div>
-                <select
-                  value={bulkForm.category_id}
-                  onChange={e => handleCategorySelectChange(e.target.value, 'bulk')}
-                  className="px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                >
-                  <option value="">— Category: Don't change —</option>
-                  <option value="__new__">+ New category...</option>
-                  {categoryOptions.map(c => (
-                    <option key={c.id} value={c.id}>{c.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <select
-                  value={bulkForm.is_recurring}
-                  onChange={e => setBulkForm(f => ({ ...f, is_recurring: e.target.value as BulkForm['is_recurring'] }))}
-                  className="px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                >
-                  <option value="">— Recurring: Don't change —</option>
-                  <option value="true">Recurring: Yes</option>
-                  <option value="false">Recurring: No</option>
-                </select>
-              </div>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 flex-1 min-w-0">
+              <select
+                value={bulkForm.category_id}
+                onChange={e => handleCategorySelectChange(e.target.value, 'bulk')}
+                className="w-full sm:w-auto px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                <option value="">Category: No change</option>
+                <option value="__new__">+ New category...</option>
+                {categoryOptions.map(c => (
+                  <option key={c.id} value={c.id}>{c.label}</option>
+                ))}
+              </select>
+              <select
+                value={bulkForm.is_recurring}
+                onChange={e => setBulkForm(f => ({ ...f, is_recurring: e.target.value as BulkForm['is_recurring'] }))}
+                className="w-full sm:w-auto px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              >
+                <option value="">Recurring: No change</option>
+                <option value="true">Recurring: Yes</option>
+                <option value="false">Recurring: No</option>
+              </select>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-shrink-0">
               <button
                 onClick={saveBulk}
                 disabled={bulkSaving || (!bulkForm.category_id && !bulkForm.is_recurring)}
@@ -978,11 +999,12 @@ export default function TransactionsPage() {
 
       {/* Table */}
       <div className="card p-0 overflow-x-auto">
-        <table className="w-full text-sm min-w-[700px]">
+        <table className="w-full text-sm min-w-[740px]">
           <thead>
             <tr className="border-b border-gray-800 text-gray-400 text-xs">
-              <th className="px-2 py-3 w-10">
+              <th className="pl-3 pr-1 py-3 w-10">
                 <input
+                  ref={headerCheckboxRef}
                   type="checkbox"
                   checked={selectAll}
                   onChange={toggleSelectAll}
@@ -1020,7 +1042,7 @@ export default function TransactionsPage() {
                   )}
                 </span>
               </th>
-              <th className="text-center px-4 py-3 font-medium w-16">Edit</th>
+              <th className="text-center px-4 py-3 font-medium w-12">Edit</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800/50">
@@ -1043,14 +1065,14 @@ export default function TransactionsPage() {
                 if (isEditing) {
                   return (
                     <tr key={tx.id} className="bg-gray-800/40">
-                      <td colSpan={COL_COUNT} className="px-4 py-3">
+                      <td colSpan={COL_COUNT} className="px-3 sm:px-4 py-3">
                         <div className="space-y-3">
                           <div className="flex items-center gap-2 text-xs text-gray-500">
                             <span className="font-mono">{formatDate(tx.date)}</span>
                             <span>{formatCAD(tx.amount)}</span>
                             {acc && <span className="text-gray-600">· {acc.name}</span>}
                           </div>
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
                             <div>
                               <label className="text-xs text-gray-500 block mb-1">Payee</label>
                               <input
@@ -1083,7 +1105,6 @@ export default function TransactionsPage() {
                                   <option key={c.id} value={c.id}>{c.label}</option>
                                 ))}
                               </select>
-                              {newCatContext === 'single' && newCategoryFormUI}
                             </div>
                             <div>
                               <label className="text-xs text-gray-500 block mb-1">Notes</label>
@@ -1096,6 +1117,8 @@ export default function TransactionsPage() {
                               />
                             </div>
                           </div>
+                          {/* New category form — rendered full-width below the edit grid */}
+                          {newCatContext === 'single' && newCategoryFormUI}
                           <div className="flex items-center gap-3 flex-wrap">
                             <label className="flex items-center gap-1.5 text-xs text-gray-400">
                               <input
@@ -1106,14 +1129,14 @@ export default function TransactionsPage() {
                               />
                               Recurring
                             </label>
-                            <span className="w-px h-4 bg-gray-700" />
+                            <span className="w-px h-4 bg-gray-700 hidden sm:block" />
                             <button
                               onClick={() => setAddingAs({ type: 'subscription', tx })}
                               disabled={addingSaving}
                               className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-indigo-300 hover:bg-indigo-500/10 rounded transition-colors"
                               title="Add this merchant as a subscription and mark all matching transactions as recurring"
                             >
-                              <Repeat size={11} /> Add as Subscription
+                              <Repeat size={11} /> <span className="hidden sm:inline">Add as</span> Subscription
                             </button>
                             <button
                               onClick={() => setAddingAs({ type: 'bill', tx })}
@@ -1121,9 +1144,9 @@ export default function TransactionsPage() {
                               className="flex items-center gap-1 px-2 py-1 text-xs text-gray-500 hover:text-amber-300 hover:bg-amber-500/10 rounded transition-colors"
                               title="Add this merchant as a fixed bill and mark all matching transactions as recurring"
                             >
-                              <CalendarClock size={11} /> Add as Fixed Bill
+                              <CalendarClock size={11} /> <span className="hidden sm:inline">Add as</span> Fixed Bill
                             </button>
-                            <div className="flex-1" />
+                            <div className="basis-full sm:basis-0 sm:flex-1" />
                             <button
                               onClick={saveEdit}
                               className="flex items-center gap-1 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs rounded transition-colors"
@@ -1145,7 +1168,7 @@ export default function TransactionsPage() {
 
                 return (
                   <tr key={tx.id} className={`hover:bg-gray-800/30 transition-colors ${selected.has(tx.id) ? 'bg-indigo-500/5' : ''}`}>
-                    <td className="px-2 py-2.5 w-10">
+                    <td className="pl-3 pr-1 py-2.5 w-10">
                       <input
                         type="checkbox"
                         checked={selected.has(tx.id)}
